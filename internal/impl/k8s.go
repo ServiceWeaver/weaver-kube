@@ -23,6 +23,7 @@ import (
 	swruntime "github.com/ServiceWeaver/weaver/runtime"
 	"github.com/ServiceWeaver/weaver/runtime/bin"
 	"github.com/ServiceWeaver/weaver/runtime/protos"
+	_ "go.opentelemetry.io/otel/exporters/jaeger"
 	"golang.org/x/exp/maps"
 	appsv1 "k8s.io/api/apps/v1"
 	v1 "k8s.io/api/apps/v1"
@@ -52,8 +53,30 @@ const (
 	// information for a babysitter deployed using k8s.
 	k8sConfigEnvKey = "SERVICEWEAVER_DEPLOYMENT_CONFIG"
 
+	// The name of the Jaeger application.
+	jaegerAppName = "jaeger"
+
+	// The name of the jaeger image used to handle the traces.
+	//
+	// all-in-one[1] combines the three Jaeger components: agent, collector, and
+	// query service/UI in a single binary, which is enough for handling the traces
+	// in a kubernetes deployment. However, we don't really need an agent. Also,
+	// we may want to launch separate collector and query services later on. Or,
+	// we may want to launch an otel collector service as well, to ensure that the
+	// traces are available, even if the deployment is deleted.
+	//
+	// [1] https://www.jaegertracing.io/docs/1.45/deployment/#all-in-one
+	jaegerImageName = "jaegertracing/all-in-one"
+
 	// The exported port by the Service Weaver services.
 	servicePort = 80
+
+	// The port on which the Jaeger UI is listening on.
+	jaegerUIPort = 16686
+
+	// The port on which the Jaeger collector is receiving traces from the
+	// clients when using the Jaeger exporter.
+	jaegerCollectorPort = 14268
 )
 
 var (
@@ -161,6 +184,13 @@ func GenerateK8sDeployment(image string, dep *protos.Deployment) error {
 		}
 		k8sGenerated = append(k8sGenerated, []byte("\n")...)
 	}
+
+	// Generate the jaeger deployment info.
+	jaegerGen, err := generateJaegerDeployment(dep)
+	if err != nil {
+		return fmt.Errorf("unable to create k8s jaeger deployment: %w", err)
+	}
+	k8sGenerated = append(k8sGenerated, jaegerGen...)
 
 	// Write the k8s deployment info into a file.
 	yamlFile := fmt.Sprintf("kube_%s.yaml", dep.Id)
@@ -464,4 +494,98 @@ func getComponents(dep *protos.Deployment) (map[string]*ReplicaSetConfig_Listene
 		externalPort++
 	}
 	return components, nil
+}
+
+// generateJaegerDeployment generates the Jaeger k8s deployment and service
+// information for a given app deployment.
+func generateJaegerDeployment(dep *protos.Deployment) ([]byte, error) {
+	name := name{dep.App.Name, jaegerAppName, dep.Id[:8]}.DNSLabel()
+
+	// Generate the Jaeger deployment.
+	d := &appsv1.Deployment{
+		TypeMeta: metav1.TypeMeta{
+			APIVersion: "apps/v1",
+			Kind:       "Deployment",
+		},
+		ObjectMeta: metav1.ObjectMeta{
+			Name:   name,
+			Labels: map[string]string{deploymentIDKey: dep.Id},
+		},
+		Spec: appsv1.DeploymentSpec{
+			Replicas: ptrOf(int32(1)),
+			Selector: &metav1.LabelSelector{
+				MatchLabels: map[string]string{
+					"app":    name,
+					"dep_id": dep.Id,
+				},
+			},
+			Template: corev1.PodTemplateSpec{
+				ObjectMeta: metav1.ObjectMeta{
+					Labels: map[string]string{
+						"app":    name,
+						"dep_id": dep.Id,
+					},
+				},
+				Spec: corev1.PodSpec{
+					Containers: []corev1.Container{
+						{
+							Name:            name,
+							Image:           fmt.Sprintf("%s:latest", jaegerImageName),
+							ImagePullPolicy: corev1.PullIfNotPresent,
+						},
+					},
+				},
+			},
+		},
+	}
+	content, err := yaml.Marshal(d)
+	if err != nil {
+		return nil, err
+	}
+	var generated []byte
+	generated = append(generated, []byte("# Jaeger Deployment\n")...)
+	generated = append(generated, content...)
+	generated = append(generated, []byte("\n---\n")...)
+	fmt.Fprintf(os.Stderr, "Generated Jaeger deployment\n")
+
+	// Generate the Jaeger service.
+	s := &corev1.Service{
+		TypeMeta: metav1.TypeMeta{
+			APIVersion: "v1",
+			Kind:       "Service",
+		},
+		ObjectMeta: metav1.ObjectMeta{
+			Name:   name,
+			Labels: map[string]string{deploymentIDKey: dep.Id},
+		},
+		Spec: corev1.ServiceSpec{
+			Selector: map[string]string{
+				"app":    name,
+				"dep_id": dep.Id,
+			},
+			Ports: []corev1.ServicePort{
+				{
+					Name:       "ui-port",
+					Port:       jaegerUIPort,
+					Protocol:   "TCP",
+					TargetPort: intstr.IntOrString{IntVal: int32(jaegerUIPort)},
+				},
+				{
+					Name:       "collector-port",
+					Port:       jaegerCollectorPort,
+					Protocol:   "TCP",
+					TargetPort: intstr.IntOrString{IntVal: int32(jaegerCollectorPort)},
+				},
+			},
+		},
+	}
+	content, err = yaml.Marshal(s)
+	if err != nil {
+		return nil, err
+	}
+	generated = append(generated, []byte("\n# Jaeger Service\n")...)
+	generated = append(generated, content...)
+	generated = append(generated, []byte("\n")...)
+	fmt.Fprintf(os.Stderr, "Generated Jaeger service\n")
+	return generated, nil
 }
