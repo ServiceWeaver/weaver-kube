@@ -105,6 +105,20 @@ func GenerateK8sDeployment(image string, dep *protos.Deployment) error {
 		k8sGenerated = append(k8sGenerated, []byte("\n---\n")...)
 		fmt.Fprintf(os.Stderr, "Generated k8s deployment for replica set %v\n", rsc.name)
 
+		// Build a horizontal pod autoscaler for the deployment.
+		a, err := buildAutoscaler()
+		if err != nil {
+			return fmt.Errorf("unable to create k8s autoscaler for replica set %s: %w", rsc.name, err)
+		}
+		content, err := yaml.Marshal(a)
+		if err != nil {
+			return err
+		}
+		k8sGenerated = append(k8sGenerated, []byte(fmt.Sprintf("# Autoscaler for replica set %s\n", rsc.name))...)
+		k8sGenerated = append(k8sGenerated, content...)
+		k8sGenerated = append(k8sGenerated, []byte("\n---\n")...)
+		fmt.Fprintf(os.Stderr, "Generated k8s autoscaler for replica set %v\n", rsc.name)
+
 		// Build a service.
 		s, err := buildService(rsc, dep)
 		if err != nil {
@@ -156,7 +170,7 @@ func GenerateK8sDeployment(image string, dep *protos.Deployment) error {
 
 // buildDeployment generates a k8s deployment for a replica set.
 func buildDeployment(rs *replicaSetInfo, dep *protos.Deployment, image string) (
-	*v1.Deployment, error) {
+		*v1.Deployment, error) {
 	name := name{dep.App.Name, rs.name, dep.Id[:8]}.DNSLabel()
 	container, err := buildContainer(image, rs, dep)
 	if err != nil {
@@ -233,7 +247,7 @@ func buildService(rs *replicaSetInfo, dep *protos.Deployment) (*corev1.Service, 
 
 // buildService generates a k8s service for a listener.
 func buildListenerService(rs *replicaSetInfo, lis *ReplicaSetConfig_Listener, dep *protos.Deployment) (
-	*corev1.Service, error) {
+		*corev1.Service, error) {
 	appName := name{dep.App.Name, rs.name, dep.Id[:8]}.DNSLabel()
 	lisName := name{dep.App.Name, "lis", rs.name, dep.Id[:8]}.DNSLabel()
 	return &corev1.Service{
@@ -269,7 +283,7 @@ func buildListenerService(rs *replicaSetInfo, lis *ReplicaSetConfig_Listener, de
 
 // buildService builds a container for a replica set.
 func buildContainer(dockerImage string, rs *replicaSetInfo, dep *protos.Deployment) (
-	corev1.Container, error) {
+		corev1.Container, error) {
 	// Set the binary path in the deployment w.r.t. to the binary path in the
 	// docker image.
 	dep.App.Binary = fmt.Sprintf("/weaver/%s", filepath.Base(dep.App.Binary))
