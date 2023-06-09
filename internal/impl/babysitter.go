@@ -88,7 +88,7 @@ func RunBabysitter(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	defer traceExporter.Shutdown(ctx)
+	defer traceExporter.Shutdown(ctx) //nolint:errcheck // response write error
 
 	traceSaver := func(spans []trace.ReadOnlySpan) error {
 		return traceExporter.ExportSpans(ctx, spans)

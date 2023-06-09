@@ -655,9 +655,7 @@ func buildContainer(dockerImage string, rs *replicaSetInfo, dep *protos.Deployme
 		Name:            appContainerName,
 		Image:           dockerImage,
 		ImagePullPolicy: corev1.PullIfNotPresent,
-		Args: []string{
-			fmt.Sprintf("/weaver/weaver-kube babysitter"),
-		},
+		Args:            []string{"/weaver/weaver-kube babysitter"},
 		Env: []corev1.EnvVar{
 			{Name: kubeConfigEnvKey, Value: kubeCfgStr},
 		},
