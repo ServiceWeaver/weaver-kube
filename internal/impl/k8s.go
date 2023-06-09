@@ -26,7 +26,9 @@ import (
 	"golang.org/x/exp/maps"
 	appsv1 "k8s.io/api/apps/v1"
 	v1 "k8s.io/api/apps/v1"
+	v2 "k8s.io/api/autoscaling/v2"
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/intstr"
 	"sigs.k8s.io/yaml"
@@ -60,6 +62,13 @@ var (
 
 	// Start value for ports used by the public listeners.
 	externalPort = 20000
+
+	// Resource allocation units for "cpu" and "memory" resources.
+	//
+	// TODO(rgrandl): Should we allow the user to customize how many
+	// resources each pod starts with?
+	cpuUnit    = resource.MustParse("100m")
+	memoryUnit = resource.MustParse("128Mi")
 )
 
 // replicaSetInfo contains information associated with a replica set.
@@ -104,6 +113,20 @@ func GenerateK8sDeployment(image string, dep *protos.Deployment) error {
 		k8sGenerated = append(k8sGenerated, content...)
 		k8sGenerated = append(k8sGenerated, []byte("\n---\n")...)
 		fmt.Fprintf(os.Stderr, "Generated k8s deployment for replica set %v\n", rsc.name)
+
+		// Build a horizontal pod autoscaler for the deployment.
+		a, err := buildAutoscaler(rsc, dep)
+		if err != nil {
+			return fmt.Errorf("unable to create k8s autoscaler for replica set %s: %w", rsc.name, err)
+		}
+		content, err = yaml.Marshal(a)
+		if err != nil {
+			return err
+		}
+		k8sGenerated = append(k8sGenerated, []byte(fmt.Sprintf("\n# Autoscaler for replica set %s\n", rsc.name))...)
+		k8sGenerated = append(k8sGenerated, content...)
+		k8sGenerated = append(k8sGenerated, []byte("\n---\n")...)
+		fmt.Fprintf(os.Stderr, "Generated k8s autoscaler for replica set %v\n", rsc.name)
 
 		// Build a service.
 		s, err := buildService(rsc, dep)
@@ -155,8 +178,7 @@ func GenerateK8sDeployment(image string, dep *protos.Deployment) error {
 }
 
 // buildDeployment generates a k8s deployment for a replica set.
-func buildDeployment(rs *replicaSetInfo, dep *protos.Deployment, image string) (
-	*v1.Deployment, error) {
+func buildDeployment(rs *replicaSetInfo, dep *protos.Deployment, image string) (*v1.Deployment, error) {
 	name := name{dep.App.Name, rs.name, dep.Id[:8]}.DNSLabel()
 	container, err := buildContainer(image, rs, dep)
 	if err != nil {
@@ -175,7 +197,6 @@ func buildDeployment(rs *replicaSetInfo, dep *protos.Deployment, image string) (
 			},
 		},
 		Spec: appsv1.DeploymentSpec{
-			Replicas: ptrOf(int32(1)),
 			Selector: &metav1.LabelSelector{
 				MatchLabels: map[string]string{
 					"app":      name,
@@ -232,8 +253,7 @@ func buildService(rs *replicaSetInfo, dep *protos.Deployment) (*corev1.Service, 
 }
 
 // buildService generates a k8s service for a listener.
-func buildListenerService(rs *replicaSetInfo, lis *ReplicaSetConfig_Listener, dep *protos.Deployment) (
-	*corev1.Service, error) {
+func buildListenerService(rs *replicaSetInfo, lis *ReplicaSetConfig_Listener, dep *protos.Deployment) (*corev1.Service, error) {
 	appName := name{dep.App.Name, rs.name, dep.Id[:8]}.DNSLabel()
 	lisName := name{dep.App.Name, "lis", rs.name, dep.Id[:8]}.DNSLabel()
 	return &corev1.Service{
@@ -267,9 +287,46 @@ func buildListenerService(rs *replicaSetInfo, lis *ReplicaSetConfig_Listener, de
 	}, nil
 }
 
-// buildService builds a container for a replica set.
-func buildContainer(dockerImage string, rs *replicaSetInfo, dep *protos.Deployment) (
-	corev1.Container, error) {
+// buildAutoscaler generates a k8s horizontal pod autoscaler for a replica set.
+func buildAutoscaler(rs *replicaSetInfo, dep *protos.Deployment) (*v2.HorizontalPodAutoscaler, error) {
+	aname := name{dep.App.Name, "hpa", rs.name, dep.Id[:8]}.DNSLabel()
+	depName := name{dep.App.Name, rs.name, dep.Id[:8]}.DNSLabel()
+	return &v2.HorizontalPodAutoscaler{
+		TypeMeta: metav1.TypeMeta{
+			APIVersion: "autoscaling/v2",
+			Kind:       "HorizontalPodAutoscaler",
+		},
+		ObjectMeta: metav1.ObjectMeta{
+			Name: aname,
+		},
+		Spec: v2.HorizontalPodAutoscalerSpec{
+			ScaleTargetRef: v2.CrossVersionObjectReference{
+				APIVersion: "apps/v1",
+				Kind:       "Deployment",
+				Name:       depName,
+			},
+			MinReplicas: ptrOf(int32(1)),
+			MaxReplicas: 10,
+			Metrics: []v2.MetricSpec{
+				{
+					// The pods are scaled up/down when the average CPU
+					// utilization is above/below 80%.
+					Type: v2.ResourceMetricSourceType,
+					Resource: &v2.ResourceMetricSource{
+						Name: corev1.ResourceCPU,
+						Target: v2.MetricTarget{
+							Type:               v2.UtilizationMetricType,
+							AverageUtilization: ptrOf(int32(80)),
+						},
+					},
+				},
+			},
+		},
+	}, nil
+}
+
+// buildContainer builds a container for a replica set.
+func buildContainer(dockerImage string, rs *replicaSetInfo, dep *protos.Deployment) (corev1.Container, error) {
 	// Set the binary path in the deployment w.r.t. to the binary path in the
 	// docker image.
 	dep.App.Binary = fmt.Sprintf("/weaver/%s", filepath.Base(dep.App.Binary))
@@ -291,6 +348,22 @@ func buildContainer(dockerImage string, rs *replicaSetInfo, dep *protos.Deployme
 		},
 		Env: []corev1.EnvVar{
 			{Name: k8sConfigEnvKey, Value: k8sCfgStr},
+		},
+		Resources: corev1.ResourceRequirements{
+			// NOTE: start with smallest allowed limits, and count on autoscalers
+			// doing the rest.
+			//
+			// NOTE: if we don't specify the minimum amount of compute resources
+			// required, the autoscaler doesn't work properly, because the metric
+			// server is not able to report the resource usage of the container.
+			Requests: corev1.ResourceList{
+				"memory": memoryUnit,
+				"cpu":    cpuUnit,
+			},
+			// NOTE: we don't specify any limits, allowing all available node
+			// resources to be used, if needed. Note that in practice, we
+			// attach autoscalers to all of our containers, so the extra-usage
+			// should be only for a short period of time.
 		},
 
 		// Enabling TTY and Stdin allows the user to run a shell inside the container,
