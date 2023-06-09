@@ -217,15 +217,15 @@ func buildImageSpecs(dep *protos.Deployment) (*imageSpecs, error) {
 	files := []string{dep.App.Binary}
 	var goInstall []string
 	if runtime.GOOS == "linux" && runtime.GOARCH == "amd64" {
-		// Use the running weaver-k8s tool binary.
+		// Use the running weaver-kube tool binary.
 		toolBinPath, err := os.Executable()
 		if err != nil {
 			return nil, err
 		}
 		files = append(files, toolBinPath)
 	} else {
-		// Cross-compile the weaver-k8s tool binary inside the container.
-		goInstall = append(goInstall, "github.com/ServiceWeaver/weaver-k8s/cmd/weaver-k8s@latest")
+		// Cross-compile the weaver-kube tool binary inside the container.
+		goInstall = append(goInstall, "github.com/ServiceWeaver/weaver-k8s/cmd/weaver-kube@latest")
 	}
 	return &imageSpecs{name: imageName, files: files, goInstall: goInstall}, nil
 }

@@ -33,7 +33,7 @@ var (
 	deployCmd = tool.Command{
 		Name:        "deploy",
 		Description: "Deploy a Service Weaver app",
-		Help:        "Usage:\n  weaver k8s deploy <configfile>",
+		Help:        "Usage:\n  weaver kube deploy <configfile>",
 		Flags:       flag.NewFlagSet("deploy", flag.ContinueOnError),
 		Fn:          deploy,
 	}
@@ -76,6 +76,6 @@ func deploy(ctx context.Context, args []string) error {
 		return err
 	}
 
-	// Generate the k8s deployment information.
-	return impl.GenerateK8sDeployment(image, dep)
+	// Generate the kube deployment information.
+	return impl.GenerateKubeDeployment(image, dep)
 }

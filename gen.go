@@ -14,4 +14,4 @@
 
 package weaver_k8s
 
-//go:generate ./dev/protoc.sh internal/impl/k8s.proto
+//go:generate ./dev/protoc.sh internal/impl/kube.proto

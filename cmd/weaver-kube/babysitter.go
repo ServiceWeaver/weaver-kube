@@ -30,13 +30,13 @@ var babysitterCmd = tool.Command{
 	Flags:       babysitterFlags,
 	Description: "The weaver kubernetes babysitter",
 	Help: `Usage:
-  weaver k8s babysitter
+  weaver kube babysitter
 
 Flags:
   -h, --help   Print this help message.`,
 	Fn: func(ctx context.Context, args []string) error {
 		if len(args) != 0 {
-			return fmt.Errorf("usage: weaver k8s babysitter")
+			return fmt.Errorf("usage: weaver kube babysitter")
 		}
 		return impl.RunBabysitter(ctx)
 	},
