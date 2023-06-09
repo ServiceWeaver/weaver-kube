@@ -17,7 +17,7 @@ package main
 import "github.com/ServiceWeaver/weaver/runtime/tool"
 
 func main() {
-	tool.Run("weaver k8s", map[string]*tool.Command{
+	tool.Run("weaver kube", map[string]*tool.Command{
 		"deploy": &deployCmd,
 
 		// Hidden commands.

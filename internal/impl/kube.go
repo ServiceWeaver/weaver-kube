@@ -50,9 +50,9 @@ const (
 	// belong to a particular application version.
 	deploymentIDKey = "serviceweaver/deployment_id"
 
-	// k8sConfigEnvKey is the name of the env variable that contains deployment
-	// information for a babysitter deployed using k8s.
-	k8sConfigEnvKey = "SERVICEWEAVER_DEPLOYMENT_CONFIG"
+	// kubeConfigEnvKey is the name of the env variable that contains deployment
+	// information for a babysitter deployed using kube.
+	kubeConfigEnvKey = "SERVICEWEAVER_DEPLOYMENT_CONFIG"
 
 	// The name of the Jaeger application.
 	jaegerAppName = "jaeger"
@@ -116,21 +116,21 @@ type replicaSetInfo struct {
 	internalPort int
 }
 
-// GenerateK8sDeployment generates the k8s deployment and service information for
-// a given app deployment.
-func GenerateK8sDeployment(image string, dep *protos.Deployment) error {
-	fmt.Fprintf(os.Stderr, greenText(), "\nGenerating k8s deployment info ...")
+// GenerateKubeDeployment generates the kubernetes deployment and service
+// information for a given app deployment.
+func GenerateKubeDeployment(image string, dep *protos.Deployment) error {
+	fmt.Fprintf(os.Stderr, greenText(), "\nGenerating kube deployment info ...")
 
-	// Generate the k8s replica sets for the deployment.
+	// Generate the kubernetes replica sets for the deployment.
 	replicaSets, err := buildReplicaSetSpecs(dep)
 	if err != nil {
-		return err
+		return fmt.Errorf("unable to create replica sets: %w", err)
 	}
 
 	// Generate the app deployment info.
 	content, err := generateAppDeployment(replicaSets, image, dep)
 	if err != nil {
-		return fmt.Errorf("unable to create k8s app deployment: %w", err)
+		return fmt.Errorf("unable to create kube app deployment: %w", err)
 	}
 	var generated []byte
 	generated = append(generated, content...)
@@ -138,18 +138,18 @@ func GenerateK8sDeployment(image string, dep *protos.Deployment) error {
 	// Generate the Jaeger deployment info.
 	content, err = generateJaegerDeployment(dep)
 	if err != nil {
-		return fmt.Errorf("unable to create k8s jaeger deployment: %w", err)
+		return fmt.Errorf("unable to create kube jaeger deployment: %w", err)
 	}
 	generated = append(generated, content...)
 
 	// Generate the Prometheus deployment info.
 	content, err = generatePrometheusDeployment(maps.Values(replicaSets), dep)
 	if err != nil {
-		return fmt.Errorf("unable to create k8s deployment for the Prometheus service: %w", err)
+		return fmt.Errorf("unable to create kube deployment for the Prometheus service: %w", err)
 	}
 	generated = append(generated, content...)
 
-	// Write the generated k8s info into a file.
+	// Write the generated kube info into a file.
 	yamlFile := fmt.Sprintf("kube_%s.yaml", dep.Id)
 	f, err := os.OpenFile(yamlFile, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
 	if err != nil {
@@ -158,14 +158,14 @@ func GenerateK8sDeployment(image string, dep *protos.Deployment) error {
 	defer f.Close()
 
 	if _, err := f.Write(generated); err != nil {
-		return fmt.Errorf("unable to write the k8s deployment info: %w", err)
+		return fmt.Errorf("unable to write the kube deployment info: %w", err)
 	}
-	fmt.Fprintf(os.Stderr, redText(), fmt.Sprintf("k8s deployment information successfully generated in %s", yamlFile))
+	fmt.Fprintf(os.Stderr, redText(), fmt.Sprintf("kube deployment information successfully generated in %s", yamlFile))
 	return nil
 }
 
-// generateAppDeployment generates the k8s deployment and service information for
-// a given app deployment.
+// generateAppDeployment generates the kubernetes deployment and service
+// information for a given app deployment.
 func generateAppDeployment(replicaSets map[string]*replicaSetInfo, image string, dep *protos.Deployment) ([]byte, error) {
 	var generated []byte
 
@@ -175,7 +175,7 @@ func generateAppDeployment(replicaSets map[string]*replicaSetInfo, image string,
 		// Build a deployment.
 		d, err := buildDeployment(rsc, dep, image)
 		if err != nil {
-			return nil, fmt.Errorf("unable to create k8s deployment for replica set %s: %w", rsc.name, err)
+			return nil, fmt.Errorf("unable to create kube deployment for replica set %s: %w", rsc.name, err)
 		}
 		content, err := yaml.Marshal(d)
 		if err != nil {
@@ -184,12 +184,12 @@ func generateAppDeployment(replicaSets map[string]*replicaSetInfo, image string,
 		generated = append(generated, []byte(fmt.Sprintf("# Deployment for replica set %s\n", rsc.name))...)
 		generated = append(generated, content...)
 		generated = append(generated, []byte("\n---\n")...)
-		fmt.Fprintf(os.Stderr, "Generated k8s deployment for replica set %v\n", rsc.name)
+		fmt.Fprintf(os.Stderr, "Generated kube deployment for replica set %v\n", rsc.name)
 
 		// Build a horizontal pod autoscaler for the deployment.
 		a, err := buildAutoscaler(rsc, dep)
 		if err != nil {
-			return nil, fmt.Errorf("unable to create k8s autoscaler for replica set %s: %w", rsc.name, err)
+			return nil, fmt.Errorf("unable to create kube autoscaler for replica set %s: %w", rsc.name, err)
 		}
 		content, err = yaml.Marshal(a)
 		if err != nil {
@@ -198,12 +198,12 @@ func generateAppDeployment(replicaSets map[string]*replicaSetInfo, image string,
 		generated = append(generated, []byte(fmt.Sprintf("\n# Autoscaler for replica set %s\n", rsc.name))...)
 		generated = append(generated, content...)
 		generated = append(generated, []byte("\n---\n")...)
-		fmt.Fprintf(os.Stderr, "Generated k8s autoscaler for replica set %v\n", rsc.name)
+		fmt.Fprintf(os.Stderr, "Generated kube autoscaler for replica set %v\n", rsc.name)
 
 		// Build a service.
 		s, err := buildService(rsc, dep)
 		if err != nil {
-			return nil, fmt.Errorf("unable to create k8s service for replica set %s: %w", rsc.name, err)
+			return nil, fmt.Errorf("unable to create kube service for replica set %s: %w", rsc.name, err)
 		}
 		content, err = yaml.Marshal(s)
 		if err != nil {
@@ -212,14 +212,14 @@ func generateAppDeployment(replicaSets map[string]*replicaSetInfo, image string,
 		generated = append(generated, []byte(fmt.Sprintf("\n# Service for replica set %s\n", rsc.name))...)
 		generated = append(generated, content...)
 		generated = append(generated, []byte("\n---\n")...)
-		fmt.Fprintf(os.Stderr, "Generated k8s service for replica set %v\n", rsc.name)
+		fmt.Fprintf(os.Stderr, "Generated kube service for replica set %v\n", rsc.name)
 
 		// Build a service for each listener.
 		for _, listeners := range rsc.components {
 			for _, lis := range listeners.Listeners {
 				ls, err := buildListenerService(rsc, lis, dep)
 				if err != nil {
-					return nil, fmt.Errorf("unable to create k8s listener service for %s: %w", lis.Name, err)
+					return nil, fmt.Errorf("unable to create kube listener service for %s: %w", lis.Name, err)
 				}
 				content, err = yaml.Marshal(ls)
 				if err != nil {
@@ -228,7 +228,7 @@ func generateAppDeployment(replicaSets map[string]*replicaSetInfo, image string,
 				generated = append(generated, []byte(fmt.Sprintf("\n# Listener Service for replica set %s\n", rsc.name))...)
 				generated = append(generated, content...)
 				generated = append(generated, []byte("\n---\n")...)
-				fmt.Fprintf(os.Stderr, "Generated k8s listener service for listener %v\n", lis.Name)
+				fmt.Fprintf(os.Stderr, "Generated kube listener service for listener %v\n", lis.Name)
 			}
 		}
 		generated = append(generated, []byte("\n")...)
@@ -236,7 +236,7 @@ func generateAppDeployment(replicaSets map[string]*replicaSetInfo, image string,
 	return generated, nil
 }
 
-// generateJaegerDeployment generates the Jaeger k8s deployment and service
+// generateJaegerDeployment generates the Jaeger kubernetes deployment and service
 // information for a given app deployment.
 func generateJaegerDeployment(dep *protos.Deployment) ([]byte, error) {
 	name := name{dep.App.Name, jaegerAppName, dep.Id[:8]}.DNSLabel()
@@ -330,7 +330,7 @@ func generateJaegerDeployment(dep *protos.Deployment) ([]byte, error) {
 	return generated, nil
 }
 
-// generatePrometheusDeployment generates the k8s configurations to deploy
+// generatePrometheusDeployment generates the kubernetes configurations to deploy
 // a Prometheus service for a given app deployment.
 //
 // TODO(rgrandl): check if we can simplify the config map, and the deployment info.
@@ -375,9 +375,9 @@ scrape_configs:
 	generated = append(generated, []byte(fmt.Sprintf("\n# Config Map %s\n", cname))...)
 	generated = append(generated, content...)
 	generated = append(generated, []byte("\n---\n")...)
-	fmt.Fprintf(os.Stderr, "Generated k8s deployment for config map %s\n", cname)
+	fmt.Fprintf(os.Stderr, "Generated kube deployment for config map %s\n", cname)
 
-	// Build the k8s Prometheus deployment.
+	// Build the kubernetes Prometheus deployment.
 	d := &appsv1.Deployment{
 		TypeMeta: metav1.TypeMeta{
 			APIVersion: "apps/v1",
@@ -451,9 +451,9 @@ scrape_configs:
 	generated = append(generated, []byte(fmt.Sprintf("\n# Prometheus Deployment %s\n", pname))...)
 	generated = append(generated, content...)
 	generated = append(generated, []byte("\n---\n")...)
-	fmt.Fprintf(os.Stderr, "Generated k8s deployment for Prometheus %s\n", pname)
+	fmt.Fprintf(os.Stderr, "Generated kube deployment for Prometheus %s\n", pname)
 
-	// Build the k8s Prometheus service.
+	// Build the kubernetes Prometheus service.
 	s := &corev1.Service{
 		TypeMeta: metav1.TypeMeta{
 			APIVersion: "v1",
@@ -478,11 +478,11 @@ scrape_configs:
 	generated = append(generated, []byte(fmt.Sprintf("\n# Prometheus Service %s\n", pname))...)
 	generated = append(generated, content...)
 	generated = append(generated, []byte("\n---\n")...)
-	fmt.Fprintf(os.Stderr, "Generated k8s service for Prometheus %s\n", pname)
+	fmt.Fprintf(os.Stderr, "Generated kube service for Prometheus %s\n", pname)
 	return generated, nil
 }
 
-// buildDeployment generates a k8s deployment for a replica set.
+// buildDeployment generates a kubernetes deployment for a replica set.
 func buildDeployment(rs *replicaSetInfo, dep *protos.Deployment, image string) (*v1.Deployment, error) {
 	name := name{dep.App.Name, rs.name, dep.Id[:8]}.DNSLabel()
 	container, err := buildContainer(image, rs, dep)
@@ -525,7 +525,7 @@ func buildDeployment(rs *replicaSetInfo, dep *protos.Deployment, image string) (
 	}, nil
 }
 
-// buildService generates a k8s service for a replica set.
+// buildService generates a kubernetes service for a replica set.
 func buildService(rs *replicaSetInfo, dep *protos.Deployment) (*corev1.Service, error) {
 	name := name{dep.App.Name, rs.name, dep.Id[:8]}.DNSLabel()
 	return &corev1.Service{
@@ -564,7 +564,7 @@ func buildService(rs *replicaSetInfo, dep *protos.Deployment) (*corev1.Service, 
 	}, nil
 }
 
-// buildService generates a k8s service for a listener.
+// buildService generates a kubernetes service for a listener.
 func buildListenerService(rs *replicaSetInfo, lis *ReplicaSetConfig_Listener, dep *protos.Deployment) (*corev1.Service, error) {
 	appName := name{dep.App.Name, rs.name, dep.Id[:8]}.DNSLabel()
 	lisName := name{dep.App.Name, "lis", rs.name, dep.Id[:8]}.DNSLabel()
@@ -599,7 +599,7 @@ func buildListenerService(rs *replicaSetInfo, lis *ReplicaSetConfig_Listener, de
 	}, nil
 }
 
-// buildAutoscaler generates a k8s horizontal pod autoscaler for a replica set.
+// buildAutoscaler generates a kubernetes horizontal pod autoscaler for a replica set.
 func buildAutoscaler(rs *replicaSetInfo, dep *protos.Deployment) (*v2.HorizontalPodAutoscaler, error) {
 	aname := name{dep.App.Name, "hpa", rs.name, dep.Id[:8]}.DNSLabel()
 	depName := name{dep.App.Name, rs.name, dep.Id[:8]}.DNSLabel()
@@ -642,7 +642,7 @@ func buildContainer(dockerImage string, rs *replicaSetInfo, dep *protos.Deployme
 	// Set the binary path in the deployment w.r.t. to the binary path in the
 	// docker image.
 	dep.App.Binary = fmt.Sprintf("/weaver/%s", filepath.Base(dep.App.Binary))
-	k8sCfgStr, err := proto.ToEnv(&ReplicaSetConfig{
+	kubeCfgStr, err := proto.ToEnv(&ReplicaSetConfig{
 		Deployment:        dep,
 		ReplicaSet:        rs.name,
 		ComponentsToStart: rs.components,
@@ -656,10 +656,10 @@ func buildContainer(dockerImage string, rs *replicaSetInfo, dep *protos.Deployme
 		Image:           dockerImage,
 		ImagePullPolicy: corev1.PullIfNotPresent,
 		Args: []string{
-			fmt.Sprintf("/weaver/weaver-k8s babysitter"),
+			fmt.Sprintf("/weaver/weaver-kube babysitter"),
 		},
 		Env: []corev1.EnvVar{
-			{Name: k8sConfigEnvKey, Value: k8sCfgStr},
+			{Name: kubeConfigEnvKey, Value: kubeCfgStr},
 		},
 		Resources: corev1.ResourceRequirements{
 			// NOTE: start with smallest allowed limits, and count on autoscalers
@@ -745,15 +745,15 @@ func getComponents(dep *protos.Deployment) (map[string]*ReplicaSetConfig_Listene
 	}
 
 	// Get listeners.
-	const k8sKey = "github.com/ServiceWeaver/weaver/k8s"
-	const shortK8sKey = "k8s"
+	const kubeKey = "github.com/ServiceWeaver/weaver/kube"
+	const shortKubeKey = "kube"
 
-	type k8sConfigSchema struct {
+	type kubeConfigSchema struct {
 		Listener []struct{ Name, Component string } `toml:"listeners"`
 	}
-	parsed := &k8sConfigSchema{}
-	if err := swruntime.ParseConfigSection(k8sKey, shortK8sKey, dep.App.Sections, parsed); err != nil {
-		return nil, fmt.Errorf("unable to parse k8s config: %w", err)
+	parsed := &kubeConfigSchema{}
+	if err := swruntime.ParseConfigSection(kubeKey, shortKubeKey, dep.App.Sections, parsed); err != nil {
+		return nil, fmt.Errorf("unable to parse kube config: %w", err)
 	}
 
 	for _, lis := range parsed.Listener {

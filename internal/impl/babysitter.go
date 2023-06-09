@@ -54,12 +54,12 @@ type babysitter struct {
 
 func RunBabysitter(ctx context.Context) error {
 	// Retrieve the deployment information.
-	val, ok := os.LookupEnv(k8sConfigEnvKey)
+	val, ok := os.LookupEnv(kubeConfigEnvKey)
 	if !ok {
-		return fmt.Errorf("environment variable %q not set", k8sConfigEnvKey)
+		return fmt.Errorf("environment variable %q not set", kubeConfigEnvKey)
 	}
 	if val == "" {
-		return fmt.Errorf("empty value for environment variable %q", k8sConfigEnvKey)
+		return fmt.Errorf("empty value for environment variable %q", kubeConfigEnvKey)
 	}
 	cfg := &ReplicaSetConfig{}
 	if err := proto.FromEnv(val, cfg); err != nil {

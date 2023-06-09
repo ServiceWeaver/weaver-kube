@@ -20,7 +20,7 @@ package impl;
 import "runtime/protos/config.proto";
 
 // ReplicaSetConfig contains app deployment information that is needed by a
-// babysitter started using the K8s deployer to manage a set of components.
+// babysitter started using the kube deployer to manage a set of components.
 message ReplicaSetConfig {
   message Listeners {
     repeated Listener listeners = 1;
