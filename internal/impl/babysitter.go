@@ -26,15 +26,17 @@ import (
 	"github.com/ServiceWeaver/weaver/runtime/logging"
 	"github.com/ServiceWeaver/weaver/runtime/protos"
 	"github.com/google/uuid"
+	"go.opentelemetry.io/otel/exporters/jaeger"
 	"go.opentelemetry.io/otel/sdk/trace"
 	"golang.org/x/exp/maps"
 )
 
 // babysitter starts and manages a weavelet inside the Pod.
 type babysitter struct {
-	ctx      context.Context
-	cfg      *ReplicaSetConfig
-	envelope *envelope.Envelope
+	ctx        context.Context
+	cfg        *ReplicaSetConfig
+	envelope   *envelope.Envelope
+	traceSaver func(spans []trace.ReadOnlySpan) error
 
 	// printer pretty prints log entries.
 	printer *logging.PrettyPrinter
@@ -70,12 +72,27 @@ func RunBabysitter(ctx context.Context) error {
 		return err
 	}
 
+	// Create the trace exporter.
+	collector := name{cfg.Deployment.App.Name, jaegerAppName, cfg.Deployment.Id[:8]}.DNSLabel()
+	endpoint := fmt.Sprintf("http://%s:%d/api/traces", collector, jaegerCollectorPort)
+	traceExporter, err :=
+		jaeger.New(jaeger.WithCollectorEndpoint(jaeger.WithEndpoint(endpoint)))
+	if err != nil {
+		return err
+	}
+	defer traceExporter.Shutdown(ctx)
+
+	traceSaver := func(spans []trace.ReadOnlySpan) error {
+		return traceExporter.ExportSpans(ctx, spans)
+	}
+
 	// Create the babysitter.
 	b := &babysitter{
-		ctx:      ctx,
-		cfg:      cfg,
-		envelope: e,
-		printer:  logging.NewPrettyPrinter(colors.Enabled()),
+		ctx:        ctx,
+		cfg:        cfg,
+		envelope:   e,
+		traceSaver: traceSaver,
+		printer:    logging.NewPrettyPrinter(colors.Enabled()),
 	}
 
 	// Inform the weavelet of the components it should host.
@@ -135,7 +152,10 @@ func (b *babysitter) HandleLogEntry(_ context.Context, entry *protos.LogEntry) e
 
 // HandleTraceSpans implements the envelope.EnvelopeHandler interface.
 func (b *babysitter) HandleTraceSpans(_ context.Context, spans []trace.ReadOnlySpan) error {
-	return nil
+	if b.traceSaver == nil {
+		return nil
+	}
+	return b.traceSaver(spans)
 }
 
 // GetSelfCertificate implements the envelope.EnvelopeHandler interface.
