@@ -15,8 +15,11 @@
 package impl
 
 import (
+	"bytes"
 	"context"
 	"fmt"
+	"net"
+	"net/http"
 	"os"
 
 	"github.com/ServiceWeaver/weaver-k8s/internal/proto"
@@ -24,12 +27,19 @@ import (
 	"github.com/ServiceWeaver/weaver/runtime/colors"
 	"github.com/ServiceWeaver/weaver/runtime/envelope"
 	"github.com/ServiceWeaver/weaver/runtime/logging"
+	"github.com/ServiceWeaver/weaver/runtime/metrics"
+	imetrics "github.com/ServiceWeaver/weaver/runtime/prometheus"
 	"github.com/ServiceWeaver/weaver/runtime/protos"
 	"github.com/google/uuid"
 	"go.opentelemetry.io/otel/exporters/jaeger"
 	"go.opentelemetry.io/otel/sdk/trace"
 	"golang.org/x/exp/maps"
 )
+
+// Endpoint scraped by Prometheus [1] to pull the metrics.
+//
+// [1] https://prometheus.io
+const prometheusEndpoint = "/metrics"
 
 // babysitter starts and manages a weavelet inside the Pod.
 type babysitter struct {
@@ -41,8 +51,6 @@ type babysitter struct {
 	// printer pretty prints log entries.
 	printer *logging.PrettyPrinter
 }
-
-var _ envelope.EnvelopeHandler = &babysitter{}
 
 func RunBabysitter(ctx context.Context) error {
 	// Retrieve the deployment information.
@@ -99,6 +107,29 @@ func RunBabysitter(ctx context.Context) error {
 	if err := b.envelope.UpdateComponents(maps.Keys(cfg.ComponentsToStart)); err != nil {
 		return err
 	}
+
+	// Run a http server that exports the metrics.
+	host, err := os.Hostname()
+	if err != nil {
+		return fmt.Errorf("error getting local hostname: %w", err)
+	}
+	lis, err := net.Listen("tcp", fmt.Sprintf("%s:%d", host, metricsPort))
+	if err != nil {
+		return fmt.Errorf("unable to listen on port %d: %w", metricsPort, err)
+	}
+	mux := http.NewServeMux()
+	mux.HandleFunc(prometheusEndpoint, func(w http.ResponseWriter, r *http.Request) {
+		// Read the metrics.
+		metrics := b.readMetrics()
+		var b bytes.Buffer
+		imetrics.TranslateMetricsToPrometheusTextFormat(&b, metrics, r.Host, prometheusEndpoint)
+		w.Write(b.Bytes()) //nolint:errcheck // response write error
+	})
+	go func() {
+		if err := serveHTTP(ctx, lis, mux); err != nil {
+			fmt.Fprintf(os.Stderr, "Unable to start HTTP server: %v\n", err)
+		}
+	}()
 
 	// Run the envelope and handle messages from the weavelet.
 	return e.Serve(b)
@@ -171,4 +202,29 @@ func (b *babysitter) VerifyClientCertificate(context.Context, *protos.VerifyClie
 // VerifyServerCertificate implements the envelope.EnvelopeHandler interface.
 func (b *babysitter) VerifyServerCertificate(ctx context.Context, request *protos.VerifyServerCertificateRequest) (*protos.VerifyServerCertificateReply, error) {
 	panic("unused")
+}
+
+// readMetrics returns the latest metrics from the weavelet.
+func (b *babysitter) readMetrics() []*metrics.MetricSnapshot {
+	var ms []*metrics.MetricSnapshot
+	ms = append(ms, metrics.Snapshot()...)
+	m, err := b.envelope.GetMetrics()
+	if err != nil {
+		return ms
+	}
+	return append(ms, m...)
+}
+
+// serveHTTP serves HTTP traffic on the provided listener using the provided
+// handler. The server is shut down when then provided context is cancelled.
+func serveHTTP(ctx context.Context, lis net.Listener, handler http.Handler) error {
+	server := http.Server{Handler: handler}
+	errs := make(chan error, 1)
+	go func() { errs <- server.Serve(lis) }()
+	select {
+	case err := <-errs:
+		return err
+	case <-ctx.Done():
+		return server.Shutdown(ctx)
+	}
 }

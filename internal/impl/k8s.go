@@ -18,6 +18,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"github.com/ServiceWeaver/weaver-k8s/internal/proto"
 	swruntime "github.com/ServiceWeaver/weaver/runtime"
@@ -68,6 +69,11 @@ const (
 	// [1] https://www.jaegertracing.io/docs/1.45/deployment/#all-in-one
 	jaegerImageName = "jaegertracing/all-in-one"
 
+	// The name of the Prometheus [1] image used to handle the metrics.
+	//
+	// [1] https://prometheus.io/
+	prometheusImageName = "prom/prometheus:v2.30.3"
+
 	// The exported port by the Service Weaver services.
 	servicePort = 80
 
@@ -77,6 +83,9 @@ const (
 	// The port on which the Jaeger collector is receiving traces from the
 	// clients when using the Jaeger exporter.
 	jaegerCollectorPort = 14268
+
+	// The port on which the weavelets are exporting the metrics.
+	metricsPort = 9090
 )
 
 var (
@@ -118,81 +127,29 @@ func GenerateK8sDeployment(image string, dep *protos.Deployment) error {
 		return err
 	}
 
-	var k8sGenerated []byte
-
-	// For each replica set, build a deployment and a service. If a replica set
-	// has any listeners, build a service for each listener.
-	for _, rsc := range replicaSets {
-		// Build a deployment.
-		d, err := buildDeployment(rsc, dep, image)
-		if err != nil {
-			return fmt.Errorf("unable to create k8s deployment for replica set %s: %w", rsc.name, err)
-		}
-		content, err := yaml.Marshal(d)
-		if err != nil {
-			return err
-		}
-		k8sGenerated = append(k8sGenerated, []byte(fmt.Sprintf("# Deployment for replica set %s\n", rsc.name))...)
-		k8sGenerated = append(k8sGenerated, content...)
-		k8sGenerated = append(k8sGenerated, []byte("\n---\n")...)
-		fmt.Fprintf(os.Stderr, "Generated k8s deployment for replica set %v\n", rsc.name)
-
-		// Build a horizontal pod autoscaler for the deployment.
-		a, err := buildAutoscaler(rsc, dep)
-		if err != nil {
-			return fmt.Errorf("unable to create k8s autoscaler for replica set %s: %w", rsc.name, err)
-		}
-		content, err = yaml.Marshal(a)
-		if err != nil {
-			return err
-		}
-		k8sGenerated = append(k8sGenerated, []byte(fmt.Sprintf("\n# Autoscaler for replica set %s\n", rsc.name))...)
-		k8sGenerated = append(k8sGenerated, content...)
-		k8sGenerated = append(k8sGenerated, []byte("\n---\n")...)
-		fmt.Fprintf(os.Stderr, "Generated k8s autoscaler for replica set %v\n", rsc.name)
-
-		// Build a service.
-		s, err := buildService(rsc, dep)
-		if err != nil {
-			return fmt.Errorf("unable to create k8s service for replica set %s: %w", rsc.name, err)
-		}
-		content, err = yaml.Marshal(s)
-		if err != nil {
-			return err
-		}
-		k8sGenerated = append(k8sGenerated, []byte(fmt.Sprintf("\n# Service for replica set %s\n", rsc.name))...)
-		k8sGenerated = append(k8sGenerated, content...)
-		k8sGenerated = append(k8sGenerated, []byte("\n---\n")...)
-		fmt.Fprintf(os.Stderr, "Generated k8s service for replica set %v\n", rsc.name)
-
-		// Build a service for each listener.
-		for _, listeners := range rsc.components {
-			for _, lis := range listeners.Listeners {
-				ls, err := buildListenerService(rsc, lis, dep)
-				if err != nil {
-					return fmt.Errorf("unable to create k8s listener service for %s: %w", lis.Name, err)
-				}
-				content, err = yaml.Marshal(ls)
-				if err != nil {
-					return err
-				}
-				k8sGenerated = append(k8sGenerated, []byte(fmt.Sprintf("\n# Listener Service for replica set %s\n", rsc.name))...)
-				k8sGenerated = append(k8sGenerated, content...)
-				k8sGenerated = append(k8sGenerated, []byte("\n---\n")...)
-				fmt.Fprintf(os.Stderr, "Generated k8s listener service for listener %v\n", lis.Name)
-			}
-		}
-		k8sGenerated = append(k8sGenerated, []byte("\n")...)
+	// Generate the app deployment info.
+	content, err := generateAppDeployment(replicaSets, image, dep)
+	if err != nil {
+		return fmt.Errorf("unable to create k8s app deployment: %w", err)
 	}
+	var generated []byte
+	generated = append(generated, content...)
 
-	// Generate the jaeger deployment info.
-	jaegerGen, err := generateJaegerDeployment(dep)
+	// Generate the Jaeger deployment info.
+	content, err = generateJaegerDeployment(dep)
 	if err != nil {
 		return fmt.Errorf("unable to create k8s jaeger deployment: %w", err)
 	}
-	k8sGenerated = append(k8sGenerated, jaegerGen...)
+	generated = append(generated, content...)
 
-	// Write the k8s deployment info into a file.
+	// Generate the Prometheus deployment info.
+	content, err = generatePrometheusDeployment(maps.Values(replicaSets), dep)
+	if err != nil {
+		return fmt.Errorf("unable to create k8s deployment for the Prometheus service: %w", err)
+	}
+	generated = append(generated, content...)
+
+	// Write the generated k8s info into a file.
 	yamlFile := fmt.Sprintf("kube_%s.yaml", dep.Id)
 	f, err := os.OpenFile(yamlFile, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
 	if err != nil {
@@ -200,11 +157,329 @@ func GenerateK8sDeployment(image string, dep *protos.Deployment) error {
 	}
 	defer f.Close()
 
-	if _, err := f.Write(k8sGenerated); err != nil {
+	if _, err := f.Write(generated); err != nil {
 		return fmt.Errorf("unable to write the k8s deployment info: %w", err)
 	}
 	fmt.Fprintf(os.Stderr, redText(), fmt.Sprintf("k8s deployment information successfully generated in %s", yamlFile))
 	return nil
+}
+
+// generateAppDeployment generates the k8s deployment and service information for
+// a given app deployment.
+func generateAppDeployment(replicaSets map[string]*replicaSetInfo, image string, dep *protos.Deployment) ([]byte, error) {
+	var generated []byte
+
+	// For each replica set, build a deployment and a service. If a replica set
+	// has any listeners, build a service for each listener.
+	for _, rsc := range replicaSets {
+		// Build a deployment.
+		d, err := buildDeployment(rsc, dep, image)
+		if err != nil {
+			return nil, fmt.Errorf("unable to create k8s deployment for replica set %s: %w", rsc.name, err)
+		}
+		content, err := yaml.Marshal(d)
+		if err != nil {
+			return nil, err
+		}
+		generated = append(generated, []byte(fmt.Sprintf("# Deployment for replica set %s\n", rsc.name))...)
+		generated = append(generated, content...)
+		generated = append(generated, []byte("\n---\n")...)
+		fmt.Fprintf(os.Stderr, "Generated k8s deployment for replica set %v\n", rsc.name)
+
+		// Build a horizontal pod autoscaler for the deployment.
+		a, err := buildAutoscaler(rsc, dep)
+		if err != nil {
+			return nil, fmt.Errorf("unable to create k8s autoscaler for replica set %s: %w", rsc.name, err)
+		}
+		content, err = yaml.Marshal(a)
+		if err != nil {
+			return nil, err
+		}
+		generated = append(generated, []byte(fmt.Sprintf("\n# Autoscaler for replica set %s\n", rsc.name))...)
+		generated = append(generated, content...)
+		generated = append(generated, []byte("\n---\n")...)
+		fmt.Fprintf(os.Stderr, "Generated k8s autoscaler for replica set %v\n", rsc.name)
+
+		// Build a service.
+		s, err := buildService(rsc, dep)
+		if err != nil {
+			return nil, fmt.Errorf("unable to create k8s service for replica set %s: %w", rsc.name, err)
+		}
+		content, err = yaml.Marshal(s)
+		if err != nil {
+			return nil, err
+		}
+		generated = append(generated, []byte(fmt.Sprintf("\n# Service for replica set %s\n", rsc.name))...)
+		generated = append(generated, content...)
+		generated = append(generated, []byte("\n---\n")...)
+		fmt.Fprintf(os.Stderr, "Generated k8s service for replica set %v\n", rsc.name)
+
+		// Build a service for each listener.
+		for _, listeners := range rsc.components {
+			for _, lis := range listeners.Listeners {
+				ls, err := buildListenerService(rsc, lis, dep)
+				if err != nil {
+					return nil, fmt.Errorf("unable to create k8s listener service for %s: %w", lis.Name, err)
+				}
+				content, err = yaml.Marshal(ls)
+				if err != nil {
+					return nil, err
+				}
+				generated = append(generated, []byte(fmt.Sprintf("\n# Listener Service for replica set %s\n", rsc.name))...)
+				generated = append(generated, content...)
+				generated = append(generated, []byte("\n---\n")...)
+				fmt.Fprintf(os.Stderr, "Generated k8s listener service for listener %v\n", lis.Name)
+			}
+		}
+		generated = append(generated, []byte("\n")...)
+	}
+	return generated, nil
+}
+
+// generateJaegerDeployment generates the Jaeger k8s deployment and service
+// information for a given app deployment.
+func generateJaegerDeployment(dep *protos.Deployment) ([]byte, error) {
+	name := name{dep.App.Name, jaegerAppName, dep.Id[:8]}.DNSLabel()
+
+	// Generate the Jaeger deployment.
+	d := &appsv1.Deployment{
+		TypeMeta: metav1.TypeMeta{
+			APIVersion: "apps/v1",
+			Kind:       "Deployment",
+		},
+		ObjectMeta: metav1.ObjectMeta{
+			Name:   name,
+			Labels: map[string]string{deploymentIDKey: dep.Id},
+		},
+		Spec: appsv1.DeploymentSpec{
+			Replicas: ptrOf(int32(1)),
+			Selector: &metav1.LabelSelector{
+				MatchLabels: map[string]string{
+					"app":    name,
+					"dep_id": dep.Id,
+				},
+			},
+			Template: corev1.PodTemplateSpec{
+				ObjectMeta: metav1.ObjectMeta{
+					Labels: map[string]string{
+						"app":    name,
+						"dep_id": dep.Id,
+					},
+				},
+				Spec: corev1.PodSpec{
+					Containers: []corev1.Container{
+						{
+							Name:            name,
+							Image:           fmt.Sprintf("%s:latest", jaegerImageName),
+							ImagePullPolicy: corev1.PullIfNotPresent,
+						},
+					},
+				},
+			},
+		},
+	}
+	content, err := yaml.Marshal(d)
+	if err != nil {
+		return nil, err
+	}
+	var generated []byte
+	generated = append(generated, []byte("# Jaeger Deployment\n")...)
+	generated = append(generated, content...)
+	generated = append(generated, []byte("\n---\n")...)
+	fmt.Fprintf(os.Stderr, "Generated Jaeger deployment\n")
+
+	// Generate the Jaeger service.
+	s := &corev1.Service{
+		TypeMeta: metav1.TypeMeta{
+			APIVersion: "v1",
+			Kind:       "Service",
+		},
+		ObjectMeta: metav1.ObjectMeta{
+			Name:   name,
+			Labels: map[string]string{deploymentIDKey: dep.Id},
+		},
+		Spec: corev1.ServiceSpec{
+			Selector: map[string]string{
+				"app":    name,
+				"dep_id": dep.Id,
+			},
+			Ports: []corev1.ServicePort{
+				{
+					Name:       "ui-port",
+					Port:       jaegerUIPort,
+					Protocol:   "TCP",
+					TargetPort: intstr.IntOrString{IntVal: int32(jaegerUIPort)},
+				},
+				{
+					Name:       "collector-port",
+					Port:       jaegerCollectorPort,
+					Protocol:   "TCP",
+					TargetPort: intstr.IntOrString{IntVal: int32(jaegerCollectorPort)},
+				},
+			},
+		},
+	}
+	content, err = yaml.Marshal(s)
+	if err != nil {
+		return nil, err
+	}
+	generated = append(generated, []byte("\n# Jaeger Service\n")...)
+	generated = append(generated, content...)
+	generated = append(generated, []byte("\n---\n")...)
+	fmt.Fprintf(os.Stderr, "Generated Jaeger service\n")
+	return generated, nil
+}
+
+// generatePrometheusDeployment generates the k8s configurations to deploy
+// a Prometheus service for a given app deployment.
+//
+// TODO(rgrandl): check if we can simplify the config map, and the deployment info.
+func generatePrometheusDeployment(rs []*replicaSetInfo, dep *protos.Deployment) ([]byte, error) {
+	cname := name{dep.App.Name, "prometheus", "config", dep.Id[:8]}.DNSLabel()
+	pname := name{dep.App.Name, "prometheus", dep.Id[:8]}.DNSLabel()
+
+	// Build the list of monitoring targets that should be scraped by Prometheus.
+	var targetsStr []string
+	for _, r := range rs {
+		tname := fmt.Sprintf("\n\"%s:%d\"", name{dep.App.Name, r.name, dep.Id[:8]}.DNSLabel(), metricsPort)
+		targetsStr = append(targetsStr, tname)
+	}
+	// Build the config map that holds the prometheus configuration file.
+	config := fmt.Sprintf(`
+global:
+  scrape_interval: 15s
+scrape_configs:
+  - job_name: "%s"
+    metrics_path: /metrics
+    static_configs:
+      - targets: [%v]
+`, pname, strings.Join(targetsStr, ","))
+
+	cm := corev1.ConfigMap{
+		TypeMeta: metav1.TypeMeta{
+			Kind:       "ConfigMap",
+			APIVersion: "v1",
+		},
+		ObjectMeta: metav1.ObjectMeta{
+			Name: cname,
+		},
+		Data: map[string]string{
+			"prometheus.yaml": config,
+		},
+	}
+	content, err := yaml.Marshal(cm)
+	if err != nil {
+		return nil, err
+	}
+	var generated []byte
+	generated = append(generated, []byte(fmt.Sprintf("\n# Config Map %s\n", cname))...)
+	generated = append(generated, content...)
+	generated = append(generated, []byte("\n---\n")...)
+	fmt.Fprintf(os.Stderr, "Generated k8s deployment for config map %s\n", cname)
+
+	// Build the k8s Prometheus deployment.
+	d := &appsv1.Deployment{
+		TypeMeta: metav1.TypeMeta{
+			APIVersion: "apps/v1",
+			Kind:       "Deployment",
+		},
+		ObjectMeta: metav1.ObjectMeta{
+			Name: pname,
+		},
+		Spec: appsv1.DeploymentSpec{
+			Replicas: ptrOf(int32(1)),
+			Selector: &metav1.LabelSelector{
+				MatchLabels: map[string]string{"app": pname},
+			},
+			Template: corev1.PodTemplateSpec{
+				ObjectMeta: metav1.ObjectMeta{
+					Labels: map[string]string{"app": pname},
+				},
+				Spec: corev1.PodSpec{
+					Containers: []corev1.Container{
+						{
+							Name:            pname,
+							Image:           prometheusImageName,
+							ImagePullPolicy: corev1.PullIfNotPresent,
+							Args: []string{
+								fmt.Sprintf("--config.file=/etc/%s/prometheus.yml", pname),
+								fmt.Sprintf("--storage.tsdb.path=/%s", pname),
+							},
+							Ports: []corev1.ContainerPort{{ContainerPort: metricsPort}},
+							VolumeMounts: []corev1.VolumeMount{
+								{
+									Name:      cname,
+									MountPath: fmt.Sprintf("/etc/%s/prometheus.yml", pname),
+									SubPath:   "prometheus.yaml",
+								},
+								{
+									Name:      fmt.Sprintf("%s-data", pname),
+									MountPath: fmt.Sprintf("/%s", pname),
+								},
+							},
+						},
+					},
+					Volumes: []corev1.Volume{
+						{
+							Name: cname,
+							VolumeSource: corev1.VolumeSource{
+								ConfigMap: &corev1.ConfigMapVolumeSource{
+									LocalObjectReference: corev1.LocalObjectReference{
+										Name: cname,
+									},
+									Items: []corev1.KeyToPath{
+										{
+											Key:  "prometheus.yaml",
+											Path: "prometheus.yaml",
+										},
+									},
+								},
+							},
+						},
+						{
+							Name: fmt.Sprintf("%s-data", pname),
+						},
+					},
+				},
+			},
+		},
+	}
+	content, err = yaml.Marshal(d)
+	if err != nil {
+		return nil, err
+	}
+	generated = append(generated, []byte(fmt.Sprintf("\n# Prometheus Deployment %s\n", pname))...)
+	generated = append(generated, content...)
+	generated = append(generated, []byte("\n---\n")...)
+	fmt.Fprintf(os.Stderr, "Generated k8s deployment for Prometheus %s\n", pname)
+
+	// Build the k8s Prometheus service.
+	s := &corev1.Service{
+		TypeMeta: metav1.TypeMeta{
+			APIVersion: "v1",
+			Kind:       "Service",
+		},
+		ObjectMeta: metav1.ObjectMeta{Name: pname},
+		Spec: corev1.ServiceSpec{
+			Selector: map[string]string{"app": pname},
+			Ports: []corev1.ServicePort{
+				{
+					Port:       servicePort,
+					Protocol:   "TCP",
+					TargetPort: intstr.IntOrString{IntVal: int32(metricsPort)},
+				},
+			},
+		},
+	}
+	content, err = yaml.Marshal(s)
+	if err != nil {
+		return nil, err
+	}
+	generated = append(generated, []byte(fmt.Sprintf("\n# Prometheus Service %s\n", pname))...)
+	generated = append(generated, content...)
+	generated = append(generated, []byte("\n---\n")...)
+	fmt.Fprintf(os.Stderr, "Generated k8s service for Prometheus %s\n", pname)
+	return generated, nil
 }
 
 // buildDeployment generates a k8s deployment for a replica set.
@@ -273,9 +548,16 @@ func buildService(rs *replicaSetInfo, dep *protos.Deployment) (*corev1.Service, 
 			},
 			Ports: []corev1.ServicePort{
 				{
+					Name:       "service-port",
 					Port:       servicePort,
 					Protocol:   "TCP",
 					TargetPort: intstr.IntOrString{IntVal: int32(rs.internalPort)},
+				},
+				{
+					Name:       "metrics-port",
+					Port:       metricsPort,
+					Protocol:   "TCP",
+					TargetPort: intstr.IntOrString{IntVal: int32(metricsPort)},
 				},
 			},
 		},
@@ -494,98 +776,4 @@ func getComponents(dep *protos.Deployment) (map[string]*ReplicaSetConfig_Listene
 		externalPort++
 	}
 	return components, nil
-}
-
-// generateJaegerDeployment generates the Jaeger k8s deployment and service
-// information for a given app deployment.
-func generateJaegerDeployment(dep *protos.Deployment) ([]byte, error) {
-	name := name{dep.App.Name, jaegerAppName, dep.Id[:8]}.DNSLabel()
-
-	// Generate the Jaeger deployment.
-	d := &appsv1.Deployment{
-		TypeMeta: metav1.TypeMeta{
-			APIVersion: "apps/v1",
-			Kind:       "Deployment",
-		},
-		ObjectMeta: metav1.ObjectMeta{
-			Name:   name,
-			Labels: map[string]string{deploymentIDKey: dep.Id},
-		},
-		Spec: appsv1.DeploymentSpec{
-			Replicas: ptrOf(int32(1)),
-			Selector: &metav1.LabelSelector{
-				MatchLabels: map[string]string{
-					"app":    name,
-					"dep_id": dep.Id,
-				},
-			},
-			Template: corev1.PodTemplateSpec{
-				ObjectMeta: metav1.ObjectMeta{
-					Labels: map[string]string{
-						"app":    name,
-						"dep_id": dep.Id,
-					},
-				},
-				Spec: corev1.PodSpec{
-					Containers: []corev1.Container{
-						{
-							Name:            name,
-							Image:           fmt.Sprintf("%s:latest", jaegerImageName),
-							ImagePullPolicy: corev1.PullIfNotPresent,
-						},
-					},
-				},
-			},
-		},
-	}
-	content, err := yaml.Marshal(d)
-	if err != nil {
-		return nil, err
-	}
-	var generated []byte
-	generated = append(generated, []byte("# Jaeger Deployment\n")...)
-	generated = append(generated, content...)
-	generated = append(generated, []byte("\n---\n")...)
-	fmt.Fprintf(os.Stderr, "Generated Jaeger deployment\n")
-
-	// Generate the Jaeger service.
-	s := &corev1.Service{
-		TypeMeta: metav1.TypeMeta{
-			APIVersion: "v1",
-			Kind:       "Service",
-		},
-		ObjectMeta: metav1.ObjectMeta{
-			Name:   name,
-			Labels: map[string]string{deploymentIDKey: dep.Id},
-		},
-		Spec: corev1.ServiceSpec{
-			Selector: map[string]string{
-				"app":    name,
-				"dep_id": dep.Id,
-			},
-			Ports: []corev1.ServicePort{
-				{
-					Name:       "ui-port",
-					Port:       jaegerUIPort,
-					Protocol:   "TCP",
-					TargetPort: intstr.IntOrString{IntVal: int32(jaegerUIPort)},
-				},
-				{
-					Name:       "collector-port",
-					Port:       jaegerCollectorPort,
-					Protocol:   "TCP",
-					TargetPort: intstr.IntOrString{IntVal: int32(jaegerCollectorPort)},
-				},
-			},
-		},
-	}
-	content, err = yaml.Marshal(s)
-	if err != nil {
-		return nil, err
-	}
-	generated = append(generated, []byte("\n# Jaeger Service\n")...)
-	generated = append(generated, content...)
-	generated = append(generated, []byte("\n")...)
-	fmt.Fprintf(os.Stderr, "Generated Jaeger service\n")
-	return generated, nil
 }

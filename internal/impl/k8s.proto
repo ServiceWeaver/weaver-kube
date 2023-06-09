@@ -34,4 +34,3 @@ message ReplicaSetConfig {
   map<string, Listeners> components_to_start = 3;
   int32 internal_port = 4;
 }
-
