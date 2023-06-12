@@ -28,6 +28,7 @@ message ReplicaSetConfig {
   message Listener {
     string name = 1;
     int32 external_port = 2;
+    bool is_public = 3;
   }
   runtime.Deployment deployment = 1;
   string replica_set = 2;

@@ -6,8 +6,8 @@ github.com/DataDog/hyperloglog v0.0.0-20220214164406-974598347557 h1:t+/ZxFkPEVJ
 github.com/Microsoft/go-winio v0.6.1 h1:9/kr64B9VUZrLm5YYwbGtUJnMgqWVOdUAXu6Migciow=
 github.com/Microsoft/go-winio v0.6.1/go.mod h1:LRdKpFKfdobln8UmuiYcKPot9D2v6svN5+sAH+4kjUM=
 github.com/Microsoft/hcsshim v0.10.0-rc.8 h1:YSZVvlIIDD1UxQpJp0h+dnpLUw+TrY0cx8obKsp3bek=
-github.com/ServiceWeaver/weaver v0.14.0 h1:UA9Npo7yLdOZkUaMm1ydfpsgrqS8Vx60Qiko6XVa/oE=
-github.com/ServiceWeaver/weaver v0.14.0/go.mod h1:zvziH3h+Blab1yppwDsmaZks2Zd5C3/YmSNs6LCODSY=
+github.com/ServiceWeaver/weaver v0.14.1-0.20230612212517-08344fed0102 h1:tD7r7r6oBVi9cq7d9a9UdqBXmrakBeJqxLjBixQGxZI=
+github.com/ServiceWeaver/weaver v0.14.1-0.20230612212517-08344fed0102/go.mod h1:zvziH3h+Blab1yppwDsmaZks2Zd5C3/YmSNs6LCODSY=
 github.com/antlr/antlr4/runtime/Go/antlr v0.0.0-20220418222510-f25a4f6275ed h1:ue9pVfIcP+QMEjfgo/Ez4ZjNZfonGgR6NgjMaJMu1Cg=
 github.com/antlr/antlr4/runtime/Go/antlr v0.0.0-20220418222510-f25a4f6275ed/go.mod h1:F7bn7fEU90QkQ3tnmaTx3LTKLEDqnwWODIYppRQ5hnY=
 github.com/containerd/containerd v1.7.1 h1:k8DbDkSOwt5rgxQ3uCI4WMKIJxIndSCBUaGm5oRn+Go=
