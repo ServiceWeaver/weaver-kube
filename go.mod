@@ -3,7 +3,7 @@ module github.com/ServiceWeaver/weaver-k8s
 go 1.20
 
 require (
-	github.com/ServiceWeaver/weaver v0.14.0
+	github.com/ServiceWeaver/weaver v0.14.1-0.20230612212517-08344fed0102
 	github.com/docker/cli v24.0.2+incompatible
 	github.com/docker/docker v24.0.2+incompatible
 	github.com/google/uuid v1.3.0

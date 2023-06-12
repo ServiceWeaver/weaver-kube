@@ -21,7 +21,7 @@ import (
 	"strings"
 
 	"github.com/ServiceWeaver/weaver-k8s/internal/proto"
-	swruntime "github.com/ServiceWeaver/weaver/runtime"
+	"github.com/ServiceWeaver/weaver/runtime"
 	"github.com/ServiceWeaver/weaver/runtime/bin"
 	"github.com/ServiceWeaver/weaver/runtime/protos"
 	_ "go.opentelemetry.io/otel/exporters/jaeger"
@@ -565,9 +565,19 @@ func buildService(rs *replicaSetInfo, dep *protos.Deployment) (*corev1.Service, 
 }
 
 // buildService generates a kubernetes service for a listener.
+//
+// Note that for public listeners, we generate a Load Balancer service because
+// it has to be reachable from the outside; for internal listeners, we generate
+// a ClusterIP service, reachable only from internal Service Weaver services.
 func buildListenerService(rs *replicaSetInfo, lis *ReplicaSetConfig_Listener, dep *protos.Deployment) (*corev1.Service, error) {
 	appName := name{dep.App.Name, rs.name, dep.Id[:8]}.DNSLabel()
 	lisName := name{dep.App.Name, "lis", rs.name, dep.Id[:8]}.DNSLabel()
+	var serviceType string
+	if lis.IsPublic {
+		serviceType = "LoadBalancer"
+	} else {
+		serviceType = "ClusterIP"
+	}
 	return &corev1.Service{
 		TypeMeta: metav1.TypeMeta{
 			APIVersion: "v1",
@@ -582,7 +592,7 @@ func buildListenerService(rs *replicaSetInfo, lis *ReplicaSetConfig_Listener, de
 			},
 		},
 		Spec: corev1.ServiceSpec{
-			Type: "LoadBalancer",
+			Type: corev1.ServiceType(serviceType),
 			Selector: map[string]string{
 				"app":      appName,
 				"app_name": dep.App.Name,
@@ -743,35 +753,57 @@ func getComponents(dep *protos.Deployment) (map[string]*ReplicaSetConfig_Listene
 	}
 
 	// Get listeners.
+	listenersToComponent, err := bin.ReadListeners(dep.App.Binary)
+	if err != nil {
+		return nil, fmt.Errorf("unable to retrieve the listeners for binary %s: %w", dep.App.Binary, err)
+	}
+
+	for _, c := range listenersToComponent {
+		if _, found := components[c.Component]; !found {
+			return nil, fmt.Errorf("listeners mapped to unknown component: %s", c.Component)
+		}
+		for _, lis := range c.Listeners {
+			components[c.Component].Listeners = append(components[c.Component].Listeners,
+				&ReplicaSetConfig_Listener{
+					Name:         lis,
+					ExternalPort: int32(externalPort),
+				})
+			externalPort++
+		}
+	}
+
+	// Identify which of these listeners are public. By default, all listeners are
+	// private.
 	const kubeKey = "github.com/ServiceWeaver/weaver/kube"
 	const shortKubeKey = "kube"
 
 	type kubeConfigSchema struct {
-		Listener []struct{ Name, Component string } `toml:"listeners"`
+		PublicListeners []struct{ Name string } `toml:"public_listeners"`
 	}
 	parsed := &kubeConfigSchema{}
-	if err := swruntime.ParseConfigSection(kubeKey, shortKubeKey, dep.App.Sections, parsed); err != nil {
+	if err := runtime.ParseConfigSection(kubeKey, shortKubeKey, dep.App.Sections, parsed); err != nil {
 		return nil, fmt.Errorf("unable to parse kube config: %w", err)
 	}
 
-	for _, lis := range parsed.Listener {
+	updateListenerTypeFn := func(lis string, components map[string]*ReplicaSetConfig_Listeners) error {
+		for _, cl := range maps.Values(components) {
+			for _, l := range cl.Listeners {
+				if lis == l.Name {
+					l.IsPublic = true
+					return nil
+				}
+			}
+		}
+		return fmt.Errorf("public listener mapped to unknown component: %s", lis)
+	}
+
+	for _, lis := range parsed.PublicListeners {
 		if lis.Name == "" {
-			return nil, fmt.Errorf("empty name for listener")
+			return nil, fmt.Errorf("empty name for public listener")
 		}
-		if lis.Component == "" {
-			return nil, fmt.Errorf("empty component for listener %q", lis.Name)
+		if err := updateListenerTypeFn(lis.Name, components); err != nil {
+			return nil, err
 		}
-
-		if _, found := components[lis.Component]; !found {
-			return nil, fmt.Errorf("listener mapped to unknown component: %s", lis.Component)
-		}
-
-		components[lis.Component].Listeners = append(components[lis.Component].Listeners,
-			&ReplicaSetConfig_Listener{
-				Name:         lis.Name,
-				ExternalPort: int32(externalPort),
-			})
-		externalPort++
 	}
 	return components, nil
 }
