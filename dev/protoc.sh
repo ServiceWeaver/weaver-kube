@@ -42,7 +42,7 @@ fi
 # Get the local module directory that stores protos for the
 # github.com/ServiceWeaver/weaver module.
 go mod download github.com/ServiceWeaver/weaver
-weaver_dep=$(go mod graph | grep "github.com/ServiceWeaver/weaver-k8s github.com/ServiceWeaver/weaver@")
+weaver_dep=$(go mod graph | grep "github.com/ServiceWeaver/weaver-kube github.com/ServiceWeaver/weaver@")
 if test -z "$weaver_dep"; then
   printf "Go module github.com/ServiceWeaver/weaver not found.  Please run:\n\tgo mod tidy\n and then re-run this command."
   exit 1

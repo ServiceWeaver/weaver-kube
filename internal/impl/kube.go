@@ -20,8 +20,7 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/ServiceWeaver/weaver-k8s/internal/proto"
-	"github.com/ServiceWeaver/weaver/runtime"
+	"github.com/ServiceWeaver/weaver-kube/internal/proto"
 	"github.com/ServiceWeaver/weaver/runtime/bin"
 	"github.com/ServiceWeaver/weaver/runtime/protos"
 	_ "go.opentelemetry.io/otel/exporters/jaeger"
@@ -92,7 +91,7 @@ var (
 	// Start value for ports used by the weavelets to listen for internal traffic.
 	internalPort = 10000
 
-	// Start value for ports used by the public listeners.
+	// Start value for ports used by the public and private listeners.
 	externalPort = 20000
 
 	// Resource allocation units for "cpu" and "memory" resources.
@@ -116,13 +115,29 @@ type replicaSetInfo struct {
 	internalPort int
 }
 
+// ListenerOptions stores configuration options for a listener.
+type ListenerOptions struct {
+	// Is the listener public, i.e., should it receive ingress traffic
+	// from the public internet. If false, the listener is configured only
+	// for cluster-internal access.
+	Public bool
+}
+
+// kubeConfig stores the configuration information for one execution of a
+// Service Weaver application deployed using the Kube deployer.
+type KubeConfig struct {
+	// Options for the application listeners, keyed by listener name.
+	// If a listener isn't specified in the map, default options will be used.
+	Listeners map[string]*ListenerOptions
+}
+
 // GenerateKubeDeployment generates the kubernetes deployment and service
 // information for a given app deployment.
-func GenerateKubeDeployment(image string, dep *protos.Deployment) error {
+func GenerateKubeDeployment(image string, dep *protos.Deployment, cfg *KubeConfig) error {
 	fmt.Fprintf(os.Stderr, greenText(), "\nGenerating kube deployment info ...")
 
 	// Generate the kubernetes replica sets for the deployment.
-	replicaSets, err := buildReplicaSetSpecs(dep)
+	replicaSets, err := buildReplicaSetSpecs(dep, cfg)
 	if err != nil {
 		return fmt.Errorf("unable to create replica sets: %w", err)
 	}
@@ -695,11 +710,11 @@ func buildContainer(dockerImage string, rs *replicaSetInfo, dep *protos.Deployme
 
 // buildReplicaSetSpecs returns the replica sets specs for the deployment dep
 // keyed by the replica set.
-func buildReplicaSetSpecs(dep *protos.Deployment) (map[string]*replicaSetInfo, error) {
+func buildReplicaSetSpecs(dep *protos.Deployment, cfg *KubeConfig) (map[string]*replicaSetInfo, error) {
 	rsets := map[string]*replicaSetInfo{}
 
 	// Retrieve the components from the binary.
-	components, err := getComponents(dep)
+	components, err := getComponents(dep, cfg)
 	if err != nil {
 		return nil, err
 	}
@@ -735,7 +750,7 @@ func replicaSet(component string, dep *protos.Deployment) string {
 }
 
 // getComponents returns the list of components from a binary.
-func getComponents(dep *protos.Deployment) (map[string]*ReplicaSetConfig_Listeners, error) {
+func getComponents(dep *protos.Deployment, cfg *KubeConfig) (map[string]*ReplicaSetConfig_Listeners, error) {
 	// Get components.
 	components := map[string]*ReplicaSetConfig_Listeners{}
 	callGraph, err := bin.ReadComponentGraph(dep.App.Binary)
@@ -763,46 +778,17 @@ func getComponents(dep *protos.Deployment) (map[string]*ReplicaSetConfig_Listene
 			return nil, fmt.Errorf("listeners mapped to unknown component: %s", c.Component)
 		}
 		for _, lis := range c.Listeners {
+			public := false
+			if opts := cfg.Listeners[lis]; opts != nil && opts.Public {
+				public = true
+			}
 			components[c.Component].Listeners = append(components[c.Component].Listeners,
 				&ReplicaSetConfig_Listener{
 					Name:         lis,
 					ExternalPort: int32(externalPort),
+					IsPublic:     public,
 				})
 			externalPort++
-		}
-	}
-
-	// Identify which of these listeners are public. By default, all listeners are
-	// private.
-	const kubeKey = "github.com/ServiceWeaver/weaver/kube"
-	const shortKubeKey = "kube"
-
-	type kubeConfigSchema struct {
-		PublicListeners []struct{ Name string } `toml:"public_listeners"`
-	}
-	parsed := &kubeConfigSchema{}
-	if err := runtime.ParseConfigSection(kubeKey, shortKubeKey, dep.App.Sections, parsed); err != nil {
-		return nil, fmt.Errorf("unable to parse kube config: %w", err)
-	}
-
-	updateListenerTypeFn := func(lis string, components map[string]*ReplicaSetConfig_Listeners) error {
-		for _, cl := range maps.Values(components) {
-			for _, l := range cl.Listeners {
-				if lis == l.Name {
-					l.IsPublic = true
-					return nil
-				}
-			}
-		}
-		return fmt.Errorf("public listener mapped to unknown component: %s", lis)
-	}
-
-	for _, lis := range parsed.PublicListeners {
-		if lis.Name == "" {
-			return nil, fmt.Errorf("empty name for public listener")
-		}
-		if err := updateListenerTypeFn(lis.Name, components); err != nil {
-			return nil, err
 		}
 	}
 	return components, nil

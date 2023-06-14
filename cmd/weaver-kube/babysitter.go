@@ -19,7 +19,7 @@ import (
 	"flag"
 	"fmt"
 
-	"github.com/ServiceWeaver/weaver-k8s/internal/impl"
+	"github.com/ServiceWeaver/weaver-kube/internal/impl"
 	"github.com/ServiceWeaver/weaver/runtime/tool"
 )
 

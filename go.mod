@@ -1,9 +1,9 @@
-module github.com/ServiceWeaver/weaver-k8s
+module github.com/ServiceWeaver/weaver-kube
 
 go 1.20
 
 require (
-	github.com/ServiceWeaver/weaver v0.14.1-0.20230612212517-08344fed0102
+	github.com/ServiceWeaver/weaver v0.15.0
 	github.com/docker/cli v24.0.2+incompatible
 	github.com/docker/docker v24.0.2+incompatible
 	github.com/google/uuid v1.3.0
@@ -33,7 +33,6 @@ require (
 	github.com/google/gofuzz v1.2.0 // indirect
 	github.com/json-iterator/go v1.1.12 // indirect
 	github.com/klauspost/compress v1.16.5 // indirect
-	github.com/kr/text v0.2.0 // indirect
 	github.com/moby/patternmatcher v0.5.0 // indirect
 	github.com/moby/sys/sequential v0.5.0 // indirect
 	github.com/moby/term v0.5.0 // indirect
@@ -44,7 +43,6 @@ require (
 	github.com/opencontainers/image-spec v1.1.0-rc2.0.20221005185240-3a7f492d3f1b // indirect
 	github.com/opencontainers/runc v1.1.7 // indirect
 	github.com/pkg/errors v0.9.1 // indirect
-	github.com/rogpeppe/go-internal v1.10.0 // indirect
 	github.com/sirupsen/logrus v1.9.2 // indirect
 	github.com/stoewer/go-strcase v1.2.0 // indirect
 	go.opentelemetry.io/otel v1.16.0 // indirect
@@ -59,7 +57,6 @@ require (
 	golang.org/x/text v0.8.0 // indirect
 	golang.org/x/tools v0.7.0 // indirect
 	google.golang.org/genproto v0.0.0-20230306155012-7f2fa6fef1f4 // indirect
-	gopkg.in/check.v1 v1.0.0-20201130134442-10cb98267c6c // indirect
 	gopkg.in/inf.v0 v0.9.1 // indirect
 	gopkg.in/yaml.v2 v2.4.0 // indirect
 	gotest.tools/v3 v3.4.0 // indirect
