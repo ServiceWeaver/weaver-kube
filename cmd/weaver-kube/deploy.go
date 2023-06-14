@@ -21,12 +21,18 @@ import (
 	"fmt"
 	"os"
 
-	"github.com/ServiceWeaver/weaver-k8s/internal/impl"
+	"github.com/ServiceWeaver/weaver-kube/internal/impl"
+	"github.com/ServiceWeaver/weaver/runtime"
 	swruntime "github.com/ServiceWeaver/weaver/runtime"
 	"github.com/ServiceWeaver/weaver/runtime/codegen"
 	"github.com/ServiceWeaver/weaver/runtime/protos"
 	"github.com/ServiceWeaver/weaver/runtime/tool"
 	"github.com/google/uuid"
+)
+
+const (
+	configKey      = "github.com/ServiceWeaver/weaver/kube"
+	shortConfigKey = "kube"
 )
 
 var (
@@ -54,14 +60,20 @@ func deploy(ctx context.Context, args []string) error {
 	if err != nil {
 		return fmt.Errorf("load config file %q: %w", cfgFile, err)
 	}
+
+	// Parse and validate the app config.
 	app, err := swruntime.ParseConfig(cfgFile, string(cfg), codegen.ComponentConfigValidator)
 	if err != nil {
 		return fmt.Errorf("load config file %q: %w", cfgFile, err)
 	}
-
-	// Sanity check the config.
 	if _, err := os.Stat(app.Binary); errors.Is(err, os.ErrNotExist) {
 		return fmt.Errorf("binary %q doesn't exist", app.Binary)
+	}
+
+	// Parse the kube section of the config.
+	config := &impl.KubeConfig{}
+	if err := runtime.ParseConfigSection(configKey, shortConfigKey, app.Sections, config); err != nil {
+		return fmt.Errorf("parse kube config: %w", err)
 	}
 
 	// Create a deployment.
@@ -77,5 +89,5 @@ func deploy(ctx context.Context, args []string) error {
 	}
 
 	// Generate the kube deployment information.
-	return impl.GenerateKubeDeployment(image, dep)
+	return impl.GenerateKubeDeployment(image, dep, config)
 }

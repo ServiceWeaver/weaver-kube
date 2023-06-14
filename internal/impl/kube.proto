@@ -14,7 +14,7 @@
 
 syntax = "proto3";
 
-option go_package = "github.com/ServiceWeaver/weaver-k8s/internal/impl";
+option go_package = "github.com/ServiceWeaver/weaver-kube/internal/impl";
 
 package impl;
 import "runtime/protos/config.proto";

@@ -225,7 +225,7 @@ func buildImageSpecs(dep *protos.Deployment) (*imageSpecs, error) {
 		files = append(files, toolBinPath)
 	} else {
 		// Cross-compile the weaver-kube tool binary inside the container.
-		goInstall = append(goInstall, "github.com/ServiceWeaver/weaver-k8s/cmd/weaver-kube@latest")
+		goInstall = append(goInstall, "github.com/ServiceWeaver/weaver-kube/cmd/weaver-kube@latest")
 	}
 	return &imageSpecs{name: imageName, files: files, goInstall: goInstall}, nil
 }

@@ -22,7 +22,7 @@ import (
 	"net/http"
 	"os"
 
-	"github.com/ServiceWeaver/weaver-k8s/internal/proto"
+	"github.com/ServiceWeaver/weaver-kube/internal/proto"
 	"github.com/ServiceWeaver/weaver/runtime"
 	"github.com/ServiceWeaver/weaver/runtime/colors"
 	"github.com/ServiceWeaver/weaver/runtime/envelope"
