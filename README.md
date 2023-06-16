@@ -112,7 +112,7 @@ the [Service Weaver config file][collatz_config], with the following contents:
 binary = "./collatz"
 
 [kube]
-public_listeners = [{name = "collatz"}]
+listeners.collatz = {public = true}
 ```
 
 The `[kube]` section contains the name of all the listeners that are exported by
