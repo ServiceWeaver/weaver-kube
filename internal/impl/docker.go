@@ -15,6 +15,7 @@
 package impl
 
 import (
+	"bufio"
 	"context"
 	"encoding/base64"
 	"encoding/json"
@@ -196,7 +197,30 @@ func uploadImage(ctx context.Context, appImage string) error {
 	defer rd.Close()
 
 	// Wait for the image to be uploaded to docker hub.
-	_, err = io.Copy(os.Stdout, rd)
+	var imagePushEntry struct {
+		ErrorDetail struct {
+			Message string
+		}
+	}
+
+	scanner := bufio.NewScanner(io.TeeReader(rd, os.Stdout))
+
+	for scanner.Scan() {
+		line := scanner.Text()
+
+		if err := json.Unmarshal([]byte(line), &imagePushEntry); err != nil {
+			return err
+		}
+
+		if imagePushEntry.ErrorDetail.Message != "" {
+			return fmt.Errorf("%s", imagePushEntry.ErrorDetail.Message)
+		}
+	}
+
+	if scanner.Err() != nil {
+		return err
+	}
+
 	return err
 }
 
