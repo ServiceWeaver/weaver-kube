@@ -24,6 +24,7 @@ import (
 	"github.com/ServiceWeaver/weaver-kube/internal/impl"
 	"github.com/ServiceWeaver/weaver/runtime"
 	swruntime "github.com/ServiceWeaver/weaver/runtime"
+	"github.com/ServiceWeaver/weaver/runtime/bin"
 	"github.com/ServiceWeaver/weaver/runtime/codegen"
 	"github.com/ServiceWeaver/weaver/runtime/protos"
 	"github.com/ServiceWeaver/weaver/runtime/tool"
@@ -70,10 +71,25 @@ func deploy(ctx context.Context, args []string) error {
 		return fmt.Errorf("binary %q doesn't exist", app.Binary)
 	}
 
-	// Parse the kube section of the config.
+	// Parse and validate the kube section of the config.
 	config := &impl.KubeConfig{}
 	if err := runtime.ParseConfigSection(configKey, shortConfigKey, app.Sections, config); err != nil {
 		return fmt.Errorf("parse kube config: %w", err)
+	}
+	binListeners, err := bin.ReadListeners(app.Binary)
+	if err != nil {
+		return fmt.Errorf("cannot read listeners from binary %s: %w", app.Binary, err)
+	}
+	allListeners := make(map[string]struct{})
+	for _, c := range binListeners {
+		for _, l := range c.Listeners {
+			allListeners[l] = struct{}{}
+		}
+	}
+	for lis := range config.Listeners {
+		if _, ok := allListeners[lis]; !ok {
+			return fmt.Errorf("listener %s specified in the config not found in the binary", lis)
+		}
 	}
 
 	// Create a deployment.
