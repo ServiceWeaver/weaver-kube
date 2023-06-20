@@ -47,7 +47,7 @@ var dockerfileTmpl = template.Must(template.New("Dockerfile").Parse(`
 FROM ubuntu:rolling
 WORKDIR /weaver/
 RUN apt-get update
-RUN apt-get install -y golang-go{{range .}} ca-certificates
+RUN apt-get install --no-install-recommends -y golang-go{{range .}} ca-certificates
 RUN GOPATH=/weaver/ go install {{.}}{{end}}
 RUN if [ "$(ls -A /weaver/bin)" ]; then cp /weaver/bin/* /weaver/; fi
 COPY . .
