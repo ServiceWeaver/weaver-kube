@@ -26,11 +26,6 @@ func greenText() string {
 	return "\033[32m%s\033[0m\n"
 }
 
-// redText returns the ANSI escape code for a red colored text.
-func redText() string {
-	return "\033[31m%s\033[0m\n"
-}
-
 // cp copies the src file to the dst files.
 //
 // TODO(rgrandl): remove duplicate.
