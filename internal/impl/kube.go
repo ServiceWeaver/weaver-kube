@@ -175,7 +175,7 @@ func GenerateKubeDeployment(image string, dep *protos.Deployment, cfg *KubeConfi
 	if _, err := f.Write(generated); err != nil {
 		return fmt.Errorf("unable to write the kube deployment info: %w", err)
 	}
-	fmt.Fprintf(os.Stderr, redText(), fmt.Sprintf("kube deployment information successfully generated in %s", yamlFile))
+	fmt.Fprintf(os.Stderr, greenText(), fmt.Sprintf("kube deployment information successfully generated in %s", yamlFile))
 	return nil
 }
 
