@@ -16,21 +16,15 @@ package impl
 
 import (
 	"context"
-	"encoding/base64"
-	"encoding/json"
 	"fmt"
-	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime"
 	"text/template"
 	"time"
 
 	"github.com/ServiceWeaver/weaver/runtime/protos"
-	cliconfig "github.com/docker/cli/cli/config"
-	"github.com/docker/docker/api/types"
-	"github.com/docker/docker/client"
-	"github.com/docker/docker/pkg/archive"
 	"github.com/google/uuid"
 )
 
@@ -39,19 +33,19 @@ import (
 // Note that w/o a docker hub id, we cannot push the docker image to docker hub.
 const dockerHubIDEnvKey = "SERVICEWEAVER_DOCKER_HUB_ID"
 
-// dockerServerAddress contains the address of the docker hub server.
-var dockerServerAddress = "https://index.docker.io/v1/"
-
 // dockerfileTmpl contains the templatized content of the Dockerfile.
 var dockerfileTmpl = template.Must(template.New("Dockerfile").Parse(`
-FROM ubuntu:rolling
+{{if . }}
+FROM golang:1.20-bullseye as builder
+RUN echo ""{{range .}} && go install {{.}}{{end}}
+{{end}}
+FROM gcr.io/distroless/base-debian11
 WORKDIR /weaver/
-RUN apt-get update
-RUN apt-get install -y golang-go{{range .}} ca-certificates
-RUN GOPATH=/weaver/ go install {{.}}{{end}}
-RUN if [ "$(ls -A /weaver/bin)" ]; then cp /weaver/bin/* /weaver/; fi
 COPY . .
-ENTRYPOINT ["/bin/bash", "-c"]
+{{if . }}
+COPY --from=builder /go/bin/ /weaver/
+{{end}}
+ENTRYPOINT ["/weaver/weaver-kube"]
 `))
 
 // imageSpecs holds information about a container image build.
@@ -125,79 +119,25 @@ func buildImage(ctx context.Context, specs *imageSpecs) error {
 	if err := dockerFile.Close(); err != nil {
 		return err
 	}
+	return dockerBuild(ctx, workDir, specs.name)
+}
 
-	// Archive the workDir/.
-	buildContext, err := archive.TarWithOptions(workDir, &archive.TarOptions{
-		IncludeFiles: []string{"."}, // To include all files in workDir/
-	})
-	if err != nil {
-		return err
-	}
-
-	// Create a client to interact with the docker engine.
-	cli, err := client.NewClientWithOpts(client.WithAPIVersionNegotiation())
-	if err != nil {
-		return fmt.Errorf("failed to created docker client: %w", err)
-	}
-	defer cli.Close()
-
-	// Build the docker image.
-	buildResponse, err := cli.ImageBuild(ctx, buildContext, types.ImageBuildOptions{
-		Tags:       []string{specs.name},
-		Dockerfile: dockerfileTmpl.Name(),
-		Remove:     true, // to delete the buildContext after the image is built
-	})
-	if err != nil {
-		return fmt.Errorf("unable to create image: %w", err)
-	}
-	defer buildResponse.Body.Close()
-
-	// Wait for the image to build.
-	_, err = io.Copy(os.Stdout, buildResponse.Body)
-	return err
+// Use docker-cli to build the docker image.
+func dockerBuild(ctx context.Context, buildContext, tag string) error {
+	c := exec.CommandContext(ctx, "docker", "build", buildContext, "-t", tag)
+	c.Stdout = os.Stdout
+	c.Stderr = os.Stderr
+	return c.Run()
 }
 
 // uploadImage upload image appImage to docker hub.
 func uploadImage(ctx context.Context, appImage string) error {
 	fmt.Fprintf(os.Stderr, greenText(), fmt.Sprintf("\nUploading Image %s to Docker Hub ...", appImage))
 
-	// Create a client to interact with the docker engine.
-	//
-	// client.WithAPIVersionNegotiation() ensures that the client and the docker
-	// daemon use compatible APIs.
-	cli, err := client.NewClientWithOpts(client.WithAPIVersionNegotiation())
-	if err != nil {
-		return fmt.Errorf("failed to created docker client: %w", err)
-	}
-	defer cli.Close()
-
-	// Get the credentials to interact with Docker Hub.
-	credentials, err := cliconfig.Load(cliconfig.Dir())
-	if err != nil {
-		return fmt.Errorf("unable to retrieve the credentials to interact with docker hub: %w", err)
-	}
-	auth, err := credentials.GetAuthConfig(dockerServerAddress)
-	if err != nil {
-		return fmt.Errorf("unable to retrieve the authentication info to interact with docker hub: %w", err)
-	}
-	authBytes, err := json.Marshal(auth)
-	if err != nil {
-		return err
-	}
-	authBytesEnc := base64.URLEncoding.EncodeToString(authBytes)
-
-	ctx, cancel := context.WithTimeout(ctx, time.Second*120)
-	defer cancel()
-
-	rd, err := cli.ImagePush(ctx, appImage, types.ImagePushOptions{RegistryAuth: authBytesEnc})
-	if err != nil {
-		return err
-	}
-	defer rd.Close()
-
-	// Wait for the image to be uploaded to docker hub.
-	_, err = io.Copy(os.Stdout, rd)
-	return err
+	c := exec.CommandContext(ctx, "docker", "push", appImage)
+	c.Stdout = os.Stdout
+	c.Stderr = os.Stderr
+	return c.Run()
 }
 
 // buildImageSpecs build the docker image specs for an app deployment.
@@ -210,8 +150,6 @@ func buildImageSpecs(dep *protos.Deployment) (*imageSpecs, error) {
 	if dockerID == "" {
 		return nil, fmt.Errorf("unable to get the docker hub id; empty value for env variable %q", dockerHubIDEnvKey)
 	}
-
-	imageName := fmt.Sprintf("%s/weaver-%s:tag%s", dockerID, dep.App.Name, dep.Id[:8])
 
 	// Copy the app binary and the tool that starts the babysitter into the image.
 	files := []string{dep.App.Binary}
@@ -227,5 +165,9 @@ func buildImageSpecs(dep *protos.Deployment) (*imageSpecs, error) {
 		// Cross-compile the weaver-kube tool binary inside the container.
 		goInstall = append(goInstall, "github.com/ServiceWeaver/weaver-kube/cmd/weaver-kube@latest")
 	}
-	return &imageSpecs{name: imageName, files: files, goInstall: goInstall}, nil
+	return &imageSpecs{
+		name:      fmt.Sprintf("%s/weaver-%s:tag%s", dockerID, dep.App.Name, dep.Id[:8]),
+		files:     files,
+		goInstall: goInstall,
+	}, nil
 }
