@@ -40,18 +40,9 @@ var (
 	deployCmd = tool.Command{
 		Name:        "deploy",
 		Description: "Deploy a Service Weaver app",
-		Help: `Usage:
-  weaver kube deploy <configfile>
-
-Flags:
-  -h, --help	Print this help message.
-
-Docker Hub:
-  "weaver kube deploy" builds and uploads a container to Docker Hub. "weaver
-  kube deploy" uses the Docker Hub username authenticated with "docker login".
-`,
-		Flags: flag.NewFlagSet("deploy", flag.ContinueOnError),
-		Fn:    deploy,
+		Help:        "Usage:\n  weaver kube deploy <configfile>",
+		Flags:       flag.NewFlagSet("deploy", flag.ContinueOnError),
+		Fn:          deploy,
 	}
 )
 
@@ -62,12 +53,6 @@ func deploy(ctx context.Context, args []string) error {
 	}
 	if len(args) > 1 {
 		return fmt.Errorf("too many arguments")
-	}
-
-	// Get Docker Hub username.
-	username, err := impl.DockerHubUsername()
-	if err != nil {
-		return fmt.Errorf("unable to infer Docker Hub username: %w", err)
 	}
 
 	// Load the config file.
@@ -114,7 +99,7 @@ func deploy(ctx context.Context, args []string) error {
 	}
 
 	// Build the docker image for the deployment, and upload it to docker hub.
-	image, err := impl.BuildAndUploadDockerImage(ctx, dep, username)
+	image, err := impl.BuildAndUploadDockerImage(ctx, dep)
 	if err != nil {
 		return err
 	}
