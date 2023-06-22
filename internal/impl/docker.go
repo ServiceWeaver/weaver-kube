@@ -45,13 +45,10 @@ ENTRYPOINT ["/weaver/weaver-kube"]
 `))
 
 // imageSpecs holds information about a container image build.
-//
-// Note that GoInstall has to be exported, because it's used in the docker image
-// template.
 type imageSpecs struct {
-	name      string   // Name is the name of the image to build
-	files     []string // Files that should be copied to the container
-	goInstall []string // Binary targets that should be 'go install'-ed
+	name      string   // name is the name of the image to build
+	files     []string // files that should be copied to the container
+	goInstall []string // binary targets that should be 'go install'-ed
 }
 
 // BuildAndUploadDockerImage builds a docker image and upload it to Docker Hub
@@ -154,7 +151,7 @@ func buildImageSpecs(dep *protos.Deployment, username string) (*imageSpecs, erro
 		goInstall = append(goInstall, "github.com/ServiceWeaver/weaver-kube/cmd/weaver-kube@latest")
 	}
 	return &imageSpecs{
-		name:      fmt.Sprintf("%s/weaver-%s:tag%s", username, dep.App.Name, dep.Id[:8]),
+		name:      fmt.Sprintf("%s/weaver-%s:%s", username, dep.App.Name, dep.Id[:8]),
 		files:     files,
 		goInstall: goInstall,
 	}, nil
