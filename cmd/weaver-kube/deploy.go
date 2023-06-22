@@ -37,25 +37,20 @@ const (
 )
 
 var (
-	deployFlags       = flag.NewFlagSet("deploy", flag.ContinueOnError)
-	dockerhubUsername = deployFlags.String("username", "", "Docker Hub username")
-	deployCmd         = tool.Command{
+	deployCmd = tool.Command{
 		Name:        "deploy",
 		Description: "Deploy a Service Weaver app",
 		Help: `Usage:
-  weaver kube deploy [--username=<username>] <configfile>
+  weaver kube deploy <configfile>
 
 Flags:
   -h, --help	Print this help message.
-  --username	Docker Hub username.
 
 Docker Hub:
-  "weaver kube deploy" builds and uploads a container to Docker Hub. By
-  default, "weaver kube deploy" uses the Docker Hub username authenticated with
-  "docker login". You can also provide a username explicitly using the
-  --username flag.
+  "weaver kube deploy" builds and uploads a container to Docker Hub. "weaver
+  kube deploy" uses the Docker Hub username authenticated with "docker login".
 `,
-		Flags: deployFlags,
+		Flags: flag.NewFlagSet("deploy", flag.ContinueOnError),
 		Fn:    deploy,
 	}
 )
@@ -70,13 +65,9 @@ func deploy(ctx context.Context, args []string) error {
 	}
 
 	// Get Docker Hub username.
-	username := *dockerhubUsername
-	if username == "" {
-		var err error
-		username, err = impl.DockerHubUsername()
-		if err != nil {
-			return fmt.Errorf("unable to infer Docker Hub username. Please use the --username flag.\n%w", err)
-		}
+	username, err := impl.DockerHubUsername()
+	if err != nil {
+		return fmt.Errorf("unable to infer Docker Hub username: %w", err)
 	}
 
 	// Load the config file.
