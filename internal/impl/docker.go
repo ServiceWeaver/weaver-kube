@@ -20,6 +20,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"runtime"
 	"text/template"
 	"time"
@@ -27,11 +28,6 @@ import (
 	"github.com/ServiceWeaver/weaver/runtime/protos"
 	"github.com/google/uuid"
 )
-
-// dockerHubIDEnvKey is the name of the env variable that contains the docker hub id.
-//
-// Note that w/o a docker hub id, we cannot push the docker image to docker hub.
-const dockerHubIDEnvKey = "SERVICEWEAVER_DOCKER_HUB_ID"
 
 // dockerfileTmpl contains the templatized content of the Dockerfile.
 var dockerfileTmpl = template.Must(template.New("Dockerfile").Parse(`
@@ -58,10 +54,11 @@ type imageSpecs struct {
 	goInstall []string // Binary targets that should be 'go install'-ed
 }
 
-// BuildAndUploadDockerImage builds a docker image and upload it to docker hub.
-func BuildAndUploadDockerImage(ctx context.Context, dep *protos.Deployment) (string, error) {
+// BuildAndUploadDockerImage builds a docker image and upload it to Docker Hub
+// under the provided Docker Hub username.
+func BuildAndUploadDockerImage(ctx context.Context, dep *protos.Deployment, username string) (string, error) {
 	// Create the docker image specifications.
-	specs, err := buildImageSpecs(dep)
+	specs, err := buildImageSpecs(dep, username)
 	if err != nil {
 		return "", fmt.Errorf("unable to build image specs: %w", err)
 	}
@@ -141,16 +138,7 @@ func uploadImage(ctx context.Context, appImage string) error {
 }
 
 // buildImageSpecs build the docker image specs for an app deployment.
-func buildImageSpecs(dep *protos.Deployment) (*imageSpecs, error) {
-	// Get the docker hub id.
-	dockerID, ok := os.LookupEnv(dockerHubIDEnvKey)
-	if !ok {
-		return nil, fmt.Errorf("unable to get the docker hub id; env variable %q not set", dockerHubIDEnvKey)
-	}
-	if dockerID == "" {
-		return nil, fmt.Errorf("unable to get the docker hub id; empty value for env variable %q", dockerHubIDEnvKey)
-	}
-
+func buildImageSpecs(dep *protos.Deployment, username string) (*imageSpecs, error) {
 	// Copy the app binary and the tool that starts the babysitter into the image.
 	files := []string{dep.App.Binary}
 	var goInstall []string
@@ -166,8 +154,25 @@ func buildImageSpecs(dep *protos.Deployment) (*imageSpecs, error) {
 		goInstall = append(goInstall, "github.com/ServiceWeaver/weaver-kube/cmd/weaver-kube@latest")
 	}
 	return &imageSpecs{
-		name:      fmt.Sprintf("%s/weaver-%s:tag%s", dockerID, dep.App.Name, dep.Id[:8]),
+		name:      fmt.Sprintf("%s/weaver-%s:tag%s", username, dep.App.Name, dep.Id[:8]),
 		files:     files,
 		goInstall: goInstall,
 	}, nil
+}
+
+// usernameRegex matches the Username field in the output of `docker info`.
+var usernameRegex = regexp.MustCompile("(?m:^ *Username: (.*)$)")
+
+// DockerHubUsername returns the username found in the output of "docker info".
+func DockerHubUsername() (string, error) {
+	c := exec.Command("docker", "info")
+	out, err := c.Output()
+	if err != nil {
+		return "", fmt.Errorf("docker info: %w", err)
+	}
+	matches := usernameRegex.FindStringSubmatch(string(out))
+	if len(matches) == 0 {
+		return "", fmt.Errorf("docker info: Username not found")
+	}
+	return matches[1], nil
 }
