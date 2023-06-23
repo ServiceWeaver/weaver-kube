@@ -19,6 +19,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"path"
 	"path/filepath"
 	"runtime"
 	"text/template"
@@ -27,11 +28,6 @@ import (
 	"github.com/ServiceWeaver/weaver/runtime/protos"
 	"github.com/google/uuid"
 )
-
-// dockerHubIDEnvKey is the name of the env variable that contains the docker hub id.
-//
-// Note that w/o a docker hub id, we cannot push the docker image to docker hub.
-const dockerHubIDEnvKey = "SERVICEWEAVER_DOCKER_HUB_ID"
 
 // dockerfileTmpl contains the templatized content of the Dockerfile.
 var dockerfileTmpl = template.Must(template.New("Dockerfile").Parse(`
@@ -56,9 +52,9 @@ type imageSpecs struct {
 }
 
 // BuildAndUploadDockerImage builds a docker image and upload it to docker hub.
-func BuildAndUploadDockerImage(ctx context.Context, dep *protos.Deployment) (string, error) {
+func BuildAndUploadDockerImage(ctx context.Context, dep *protos.Deployment, registry string) (string, error) {
 	// Create the docker image specifications.
-	specs, err := buildImageSpecs(dep)
+	specs, err := buildImageSpecs(dep, registry)
 	if err != nil {
 		return "", fmt.Errorf("unable to build image specs: %w", err)
 	}
@@ -77,7 +73,7 @@ func BuildAndUploadDockerImage(ctx context.Context, dep *protos.Deployment) (str
 
 // buildImage creates a docker image with specs.
 func buildImage(ctx context.Context, specs *imageSpecs) error {
-	fmt.Fprintf(os.Stderr, greenText(), fmt.Sprintf("Building Image %s ...", specs.name))
+	fmt.Fprintf(os.Stderr, greenText(), fmt.Sprintf("Building image %s...", specs.name))
 	// Create:
 	//  workDir/
 	//    file1
@@ -129,7 +125,7 @@ func dockerBuild(ctx context.Context, buildContext, tag string) error {
 
 // uploadImage upload image appImage to docker hub.
 func uploadImage(ctx context.Context, appImage string) error {
-	fmt.Fprintf(os.Stderr, greenText(), fmt.Sprintf("\nUploading Image %s to Docker Hub ...", appImage))
+	fmt.Fprintf(os.Stderr, greenText(), fmt.Sprintf("\nUploading image %s...", appImage))
 
 	c := exec.CommandContext(ctx, "docker", "push", appImage)
 	c.Stdout = os.Stdout
@@ -138,16 +134,7 @@ func uploadImage(ctx context.Context, appImage string) error {
 }
 
 // buildImageSpecs build the docker image specs for an app deployment.
-func buildImageSpecs(dep *protos.Deployment) (*imageSpecs, error) {
-	// Get the docker hub id.
-	dockerID, ok := os.LookupEnv(dockerHubIDEnvKey)
-	if !ok {
-		return nil, fmt.Errorf("unable to get the docker hub id; env variable %q not set", dockerHubIDEnvKey)
-	}
-	if dockerID == "" {
-		return nil, fmt.Errorf("unable to get the docker hub id; empty value for env variable %q", dockerHubIDEnvKey)
-	}
-
+func buildImageSpecs(dep *protos.Deployment, registry string) (*imageSpecs, error) {
 	// Copy the app binary and the tool that starts the babysitter into the image.
 	files := []string{dep.App.Binary}
 	var goInstall []string
@@ -163,7 +150,7 @@ func buildImageSpecs(dep *protos.Deployment) (*imageSpecs, error) {
 		goInstall = append(goInstall, "github.com/ServiceWeaver/weaver-kube/cmd/weaver-kube@latest")
 	}
 	return &imageSpecs{
-		name:      fmt.Sprintf("%s/weaver-%s:%s", dockerID, dep.App.Name, dep.Id[:8]),
+		name:      path.Join(registry, fmt.Sprintf("weaver-%s:%s", dep.App.Name, dep.Id[:8])),
 		files:     files,
 		goInstall: goInstall,
 	}, nil
