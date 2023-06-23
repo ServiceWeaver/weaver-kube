@@ -37,6 +37,10 @@ const (
 )
 
 var (
+	deployFlags = flag.NewFlagSet("deploy", flag.ContinueOnError)
+	prometheus  = deployFlags.Bool("prometheus", false, "Generate Kubernetes config for Prometheus")
+	jaegar      = deployFlags.Bool("jaegar", false, "Generate Kubernetes config for Jaegar")
+
 	deployCmd = tool.Command{
 		Name:        "deploy",
 		Description: "Deploy a Service Weaver app",
@@ -44,7 +48,9 @@ var (
   weaver kube deploy <configfile>
 
 Flags:
-  -h, --help	Print this help message.
+  -h, --help      Print this help message.
+  --prometheus    Generate Kubernetes config for Prometheus.
+  --jaegar        Generate Kubernetes config for Jaegar.
 
 Container Image Names:
   "weaver kube deploy" builds and uploads a container image. You need to
@@ -71,7 +77,7 @@ Container Image Names:
 
   Note that for "weaver kube deploy" to work correctly, you must be
   authenticated with the provided registry (e.g., by running "docker login".)`,
-		Flags: flag.NewFlagSet("deploy", flag.ContinueOnError),
+		Flags: deployFlags,
 		Fn:    deploy,
 	}
 )
@@ -138,5 +144,6 @@ func deploy(ctx context.Context, args []string) error {
 	}
 
 	// Generate the kube deployment information.
-	return impl.GenerateKubeDeployment(image, dep, config)
+	opts := impl.GenerateOptions{Prometheus: *prometheus, Jaegar: *jaegar}
+	return impl.GenerateKubeDeployment(image, dep, config, opts)
 }

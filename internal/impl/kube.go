@@ -146,9 +146,15 @@ type KubeConfig struct {
 	Listeners map[string]*ListenerOptions
 }
 
+// GenerateOptions configures GenerateKubeDeployment.
+type GenerateOptions struct {
+	Prometheus bool // Generate Prometheus config?
+	Jaegar     bool // Generate Jaegar config?
+}
+
 // GenerateKubeDeployment generates the kubernetes deployment and service
 // information for a given app deployment.
-func GenerateKubeDeployment(image string, dep *protos.Deployment, cfg *KubeConfig) error {
+func GenerateKubeDeployment(image string, dep *protos.Deployment, cfg *KubeConfig, opts GenerateOptions) error {
 	fmt.Fprintf(os.Stderr, greenText(), "\nGenerating kube deployment info ...")
 
 	// Generate the kubernetes replica sets for the deployment.
@@ -165,19 +171,23 @@ func GenerateKubeDeployment(image string, dep *protos.Deployment, cfg *KubeConfi
 	var generated []byte
 	generated = append(generated, content...)
 
-	// Generate the Jaeger deployment info.
-	content, err = generateJaegerDeployment(dep)
-	if err != nil {
-		return fmt.Errorf("unable to create kube jaeger deployment: %w", err)
+	if opts.Jaegar {
+		// Generate the Jaeger deployment info.
+		content, err = generateJaegerDeployment(dep)
+		if err != nil {
+			return fmt.Errorf("unable to create kube jaeger deployment: %w", err)
+		}
+		generated = append(generated, content...)
 	}
-	generated = append(generated, content...)
 
-	// Generate the Prometheus deployment info.
-	content, err = generatePrometheusDeployment(maps.Values(replicaSets), dep)
-	if err != nil {
-		return fmt.Errorf("unable to create kube deployment for the Prometheus service: %w", err)
+	if opts.Prometheus {
+		// Generate the Prometheus deployment info.
+		content, err = generatePrometheusDeployment(maps.Values(replicaSets), dep)
+		if err != nil {
+			return fmt.Errorf("unable to create kube deployment for the Prometheus service: %w", err)
+		}
+		generated = append(generated, content...)
 	}
-	generated = append(generated, content...)
 
 	// Write the generated kube info into a file.
 	yamlFile := fmt.Sprintf("kube_%s.yaml", dep.Id)
