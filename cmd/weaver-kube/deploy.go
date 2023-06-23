@@ -46,26 +46,28 @@ var (
 Flags:
   -h, --help	Print this help message.
 
-Container Registries:
-  "weaver kube deploy" builds and uploads a container image to a container
-  registry. You need to specify which container registry using the "registry"
-  field inside the "kube" section of the config file. For example, consider the
-  following config file:
+Container Image Names:
+  "weaver kube deploy" builds and uploads a container image. You need to
+  specify the name of the container using the "image" field inside the "kube"
+  section of the config file. For example, consider the following config file:
 
       [serviceweaver]
       binary = "./foo"
 
       [kube]
-      registry = "my_docker_hub_username"
+      registry = "docker.io/my_docker_hub_username/foo"
 
-  Using this config file, "weaver kube deploy" will upload a container image to
-  Docker Hub by running "docker push my_docker_hub_username/IMAGE:TAG". The
-  format of the "registry" field depends on the registry being used. Some
+  Using this config file, "weaver kube deploy" will build a container called
+  "docker.io/my_docker_hub_username/foo" and upload it to Docker Hub. The
+  format of the "image" field depends on the registry being used. Some
   examples:
 
-      - Docker Hub: USERNAME
-      - Google Artifact Registry: LOCATION-docker.pkg.dev/PROJECT-ID/REPOSITORY
-      - GitHub Container Registry: ghcr.io/NAMESPACE
+      - Docker Hub: USERNAME/NAME or docker.io/USERNAME/NAME
+      - Google Artifact Registry: LOCATION-docker.pkg.dev/PROJECT-ID/REPOSITORY/NAME
+      - GitHub Container Registry: ghcr.io/NAMESPACE/NAME
+
+  "weaver kube deploy" will automatically append a tag to the image name, so
+  the "image" field should not contain a tag.
 
   Note that for "weaver kube deploy" to work correctly, you must be
   authenticated with the provided registry (e.g., by running "docker login".)`,
@@ -104,9 +106,8 @@ func deploy(ctx context.Context, args []string) error {
 	if err := runtime.ParseConfigSection(configKey, shortConfigKey, app.Sections, config); err != nil {
 		return fmt.Errorf("parse kube config: %w", err)
 	}
-	if config.Registry == "" {
-		// TODO(mwhittaker): Try to infer a sane default registry to use.
-		return fmt.Errorf("No Registry provided in config files. See `weaver kube deploy --help` for details")
+	if config.Image == "" {
+		return fmt.Errorf("No image name provided in config file. See `weaver kube deploy --help` for details")
 	}
 	binListeners, err := bin.ReadListeners(app.Binary)
 	if err != nil {
@@ -131,7 +132,7 @@ func deploy(ctx context.Context, args []string) error {
 	}
 
 	// Build the docker image for the deployment, and upload it to docker hub.
-	image, err := impl.BuildAndUploadDockerImage(ctx, dep, config.Registry)
+	image, err := impl.BuildAndUploadDockerImage(ctx, dep, config.Image)
 	if err != nil {
 		return err
 	}

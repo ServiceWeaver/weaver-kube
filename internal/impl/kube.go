@@ -126,17 +126,20 @@ type ListenerOptions struct {
 // KubeConfig stores the configuration information for one execution of a
 // Service Weaver application deployed using the Kube deployer.
 type KubeConfig struct {
-	// Registry is the container registry to which container images are
-	// uploaded. Specifically, the image name is prefixed by Registry and then
-	// `docker push`ed. For example, if Registry is "foo", then `weaver kube
-	// deploy` uploads an image using `docker push foo/IMAGE:TAG`.
+	// Image is the name of the container image that "weaver kube deploy"
+	// builds and uploads. For example, if Image is "docker.io/alanturing/foo",
+	// then "weaver kube deploy" will build a container called
+	// "docker.io/alanturing/foo" and upload it to Docker Hub.
 	//
-	// The format of Registry depends on the registry being used. For example:
+	// The format of Image depends on the registry being used. For example:
 	//
-	// - Docker Hub: USERNAME
-	// - Google Artifact Registry: LOCATION-docker.pkg.dev/PROJECT-ID/REPOSITORY
-	// - GitHub Container Registry: ghcr.io/NAMESPACE
-	Registry string
+	// - Docker Hub: USERNAME/NAME or docker.io/USERNAME/NAME
+	// - Google Artifact Registry: LOCATION-docker.pkg.dev/PROJECT-ID/REPOSITORY/NAME
+	// - GitHub Container Registry: ghcr.io/NAMESPACE/NAME
+	//
+	// Note that "weaver kube deploy" will automatically append a unique tag to
+	// Image, so Image should not already contain a tag.
+	Image string
 
 	// Options for the application listeners, keyed by listener name.
 	// If a listener isn't specified in the map, default options will be used.

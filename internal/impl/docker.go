@@ -19,7 +19,6 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
-	"path"
 	"path/filepath"
 	"runtime"
 	"text/template"
@@ -52,9 +51,9 @@ type imageSpecs struct {
 }
 
 // BuildAndUploadDockerImage builds a docker image and upload it to docker hub.
-func BuildAndUploadDockerImage(ctx context.Context, dep *protos.Deployment, registry string) (string, error) {
+func BuildAndUploadDockerImage(ctx context.Context, dep *protos.Deployment, image string) (string, error) {
 	// Create the docker image specifications.
-	specs, err := buildImageSpecs(dep, registry)
+	specs, err := buildImageSpecs(dep, image)
 	if err != nil {
 		return "", fmt.Errorf("unable to build image specs: %w", err)
 	}
@@ -134,7 +133,7 @@ func uploadImage(ctx context.Context, appImage string) error {
 }
 
 // buildImageSpecs build the docker image specs for an app deployment.
-func buildImageSpecs(dep *protos.Deployment, registry string) (*imageSpecs, error) {
+func buildImageSpecs(dep *protos.Deployment, image string) (*imageSpecs, error) {
 	// Copy the app binary and the tool that starts the babysitter into the image.
 	files := []string{dep.App.Binary}
 	var goInstall []string
@@ -150,7 +149,7 @@ func buildImageSpecs(dep *protos.Deployment, registry string) (*imageSpecs, erro
 		goInstall = append(goInstall, "github.com/ServiceWeaver/weaver-kube/cmd/weaver-kube@latest")
 	}
 	return &imageSpecs{
-		name:      path.Join(registry, fmt.Sprintf("weaver-%s:%s", dep.App.Name, dep.Id[:8])),
+		name:      fmt.Sprintf("%s:%s", image, dep.Id[:8]),
 		files:     files,
 		goInstall: goInstall,
 	}, nil
