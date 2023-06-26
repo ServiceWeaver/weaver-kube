@@ -55,7 +55,7 @@ Container Image Names:
       binary = "./foo"
 
       [kube]
-      registry = "docker.io/my_docker_hub_username/foo"
+      image = "docker.io/my_docker_hub_username/foo"
 
   Using this config file, "weaver kube deploy" will build a container called
   "docker.io/my_docker_hub_username/foo" and upload it to Docker Hub. The
