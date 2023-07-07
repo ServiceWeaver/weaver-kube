@@ -36,7 +36,10 @@ jobs:
           cache: true
       - name: Build collatz example
         working-directory: ./examples/collatz
-        run: CGO_ENABLED=0 go build -o collatz
+        run: |
+          # Disable CGO to ensure the binary is statically linked
+          CGO_ENABLED=0 \
+          go build -o collatz
       - uses: actions/upload-artifact@v3
         with:
           name: collatz-binary
