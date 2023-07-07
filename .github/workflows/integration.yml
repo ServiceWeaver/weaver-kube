@@ -67,6 +67,10 @@ jobs:
         with:
           name: collatz-binary
           path: ./examples/collatz
+      - uses: ASzc/change-string-case-action@v5
+        id: repository
+        with:
+          string: ${{ github.repository }}
       - name: Generate weaver.toml
         uses: DamianReeves/write-file-action@master
         with:
@@ -76,7 +80,7 @@ jobs:
             [serviceweaver]
             binary = "./collatz"
             [kube]
-            image = "ghcr.io/${{ github.repository }}/example-collatz"
+            image = "ghcr.io/${{ steps.repository.outputs.lowercase }}/example-collatz"
             listeners.collatz = {public = true}
       - name: Build and generate kube manifests
         working-directory: ./examples/collatz
