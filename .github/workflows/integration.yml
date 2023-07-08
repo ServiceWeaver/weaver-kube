@@ -58,6 +58,7 @@ jobs:
           go-version: '1.20'
           cache: true
       - uses: azure/setup-kubectl@v3
+      - uses: medyagh/setup-minikube@master
       - uses: docker/login-action@v2
         with:
           registry: ghcr.io
@@ -70,48 +71,12 @@ jobs:
         with:
           name: collatz-binary
           path: ./examples/collatz
-      - uses: ASzc/change-string-case-action@v5
-        id: repository
-        with:
-          string: ${{ github.repository }}
-      - name: Generate weaver.toml
-        uses: DamianReeves/write-file-action@master
-        with:
-          path: ./examples/collatz/weaver.toml
-          write-mode: overwrite
-          contents: |
-            [serviceweaver]
-            binary = "./collatz"
-            [kube]
-            image = "ghcr.io/${{ steps.repository.outputs.lowercase }}/example-collatz"
-            listeners.collatz = {public = true}
-      - name: Build and generate kube manifests
+      - name: Run integration script
         working-directory: ./examples/collatz
-        run: |
-          # Ensure the binary is executable
-          chmod +x ./collatz
-          # Build the docker image and push
-          weaver-kube deploy weaver.toml
-      - uses: medyagh/setup-minikube@master
-        id: minikube
-      - name: Deploy the application
-        working-directory: ./examples/collatz
-        run: |
-          kubectl apply -f ./kube_*.yaml
-      - name: Wait for deployment to be ready
-        working-directory: ./examples/collatz
-        run: |
-          kubectl wait --for=condition=Available=True --timeout=90s Deployment -l serviceweaver/app_name=collatz
-      - name: Call the collatz API
-        run: |
-          # Get the load balancer name
-          LOAD_BALANCER_NAME=$(kubectl get service \
-            -l serviceweaver/app_name=collatz \
-            -o=go-template \
-            --template='{{- range .items -}}{{- if eq .spec.type "LoadBalancer" -}}{{ .metadata.name }}{{- end -}}{{- end -}}')
-          # Call the API and check the response
-          kubectl run -i --rm --restart=Never --image=busybox:latest test-api \
-            --command wget -- -q -O - http://$LOAD_BALANCER_NAME/\?x\=10
+        run: ../../dev/integration.sh
+        shell: bash
+        env:
+          IMAGE_NAME: ghcr.io/${{ github.repository }}/example-collatz
       - name: Display deployment logs
         if: failure()
         working-directory: ./examples/collatz
