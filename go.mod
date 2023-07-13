@@ -1,6 +1,6 @@
 module github.com/ServiceWeaver/weaver-kube
 
-go 1.20
+go 1.21
 
 require (
 	github.com/ServiceWeaver/weaver v0.17.1-0.20230720212036-7b261fed1c5f
