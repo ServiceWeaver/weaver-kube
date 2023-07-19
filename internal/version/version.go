@@ -4,7 +4,7 @@
 // you may not use this file except in compliance with the License.
 // You may obtain a copy of the License at
 //
-//     http://www.apache.org/licenses/LICENSE-2.0
+//      http://www.apache.org/licenses/LICENSE-2.0
 //
 // Unless required by applicable law or agreed to in writing, software
 // distributed under the License is distributed on an "AS IS" BASIS,
@@ -12,16 +12,11 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-package main
+package version
 
-import "github.com/ServiceWeaver/weaver/runtime/tool"
-
-func main() {
-	tool.Run("weaver kube", map[string]*tool.Command{
-		"version": &versionCmd,
-		"deploy":  &deployCmd,
-
-		// Hidden commands.
-		"babysitter": &babysitterCmd,
-	})
-}
+const (
+	// weaver-kube module version (Major.Minor.Patch).
+	Major = 0
+	Minor = 18
+	Patch = 0
+)
