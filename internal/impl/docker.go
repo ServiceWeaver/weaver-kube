@@ -28,12 +28,16 @@ import (
 )
 
 // dockerfileTmpl contains the templatized content of the Dockerfile.
+//
+// TODO(rgrandl): See if we can use a much simpler image. Previously we've been
+// using gcr.io/distroless/base-debian11, but it lacks libraries that can lead to
+// runtime errors (e.g., glibc).
 var dockerfileTmpl = template.Must(template.New("Dockerfile").Parse(`
 {{if . }}
 FROM golang:1.20-bullseye as builder
 RUN echo ""{{range .}} && go install {{.}}{{end}}
 {{end}}
-FROM gcr.io/distroless/base-debian11
+FROM ubuntu:rolling
 WORKDIR /weaver/
 COPY . .
 {{if . }}

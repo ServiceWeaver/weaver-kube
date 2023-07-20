@@ -30,6 +30,7 @@ import (
 	"github.com/ServiceWeaver/weaver/runtime/metrics"
 	imetrics "github.com/ServiceWeaver/weaver/runtime/prometheus"
 	"github.com/ServiceWeaver/weaver/runtime/protos"
+	"github.com/ServiceWeaver/weaver/runtime/traces"
 	"github.com/google/uuid"
 	"go.opentelemetry.io/otel/exporters/jaeger"
 	"go.opentelemetry.io/otel/sdk/trace"
@@ -43,10 +44,10 @@ const prometheusEndpoint = "/metrics"
 
 // babysitter starts and manages a weavelet inside the Pod.
 type babysitter struct {
-	ctx        context.Context
-	cfg        *ReplicaSetConfig
-	envelope   *envelope.Envelope
-	traceSaver func(spans []trace.ReadOnlySpan) error
+	ctx          context.Context
+	cfg          *ReplicaSetConfig
+	envelope     *envelope.Envelope
+	exportTraces func(spans *protos.TraceSpans) error
 
 	// printer pretty prints log entries.
 	printer *logging.PrettyPrinter
@@ -90,17 +91,21 @@ func RunBabysitter(ctx context.Context) error {
 	}
 	defer traceExporter.Shutdown(ctx) //nolint:errcheck // response write error
 
-	traceSaver := func(spans []trace.ReadOnlySpan) error {
-		return traceExporter.ExportSpans(ctx, spans)
+	exportTraces := func(spans *protos.TraceSpans) error {
+		var spansToExport []trace.ReadOnlySpan
+		for _, span := range spans.Span {
+			spansToExport = append(spansToExport, &traces.ReadSpan{Span: span})
+		}
+		return traceExporter.ExportSpans(ctx, spansToExport)
 	}
 
 	// Create the babysitter.
 	b := &babysitter{
-		ctx:        ctx,
-		cfg:        cfg,
-		envelope:   e,
-		traceSaver: traceSaver,
-		printer:    logging.NewPrettyPrinter(colors.Enabled()),
+		ctx:          ctx,
+		cfg:          cfg,
+		envelope:     e,
+		exportTraces: exportTraces,
+		printer:      logging.NewPrettyPrinter(colors.Enabled()),
 	}
 
 	// Inform the weavelet of the components it should host.
@@ -182,11 +187,11 @@ func (b *babysitter) HandleLogEntry(_ context.Context, entry *protos.LogEntry) e
 }
 
 // HandleTraceSpans implements the envelope.EnvelopeHandler interface.
-func (b *babysitter) HandleTraceSpans(_ context.Context, spans []trace.ReadOnlySpan) error {
-	if b.traceSaver == nil {
+func (b *babysitter) HandleTraceSpans(_ context.Context, spans *protos.TraceSpans) error {
+	if b.exportTraces == nil {
 		return nil
 	}
-	return b.traceSaver(spans)
+	return b.exportTraces(spans)
 }
 
 // GetSelfCertificate implements the envelope.EnvelopeHandler interface.
@@ -200,7 +205,7 @@ func (b *babysitter) VerifyClientCertificate(context.Context, *protos.VerifyClie
 }
 
 // VerifyServerCertificate implements the envelope.EnvelopeHandler interface.
-func (b *babysitter) VerifyServerCertificate(ctx context.Context, request *protos.VerifyServerCertificateRequest) (*protos.VerifyServerCertificateReply, error) {
+func (b *babysitter) VerifyServerCertificate(context.Context, *protos.VerifyServerCertificateRequest) (*protos.VerifyServerCertificateReply, error) {
 	panic("unused")
 }
 
