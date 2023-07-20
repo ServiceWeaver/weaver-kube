@@ -37,6 +37,9 @@ const (
 )
 
 var (
+	flags        = flag.NewFlagSet("deploy", flag.ContinueOnError)
+	runInDevMode = flags.Bool("runInDevMode", false, "Whether deploy in development mode.")
+
 	deployCmd = tool.Command{
 		Name:        "deploy",
 		Description: "Deploy a Service Weaver app",
@@ -71,7 +74,7 @@ Container Image Names:
 
   Note that for "weaver kube deploy" to work correctly, you must be
   authenticated with the provided registry (e.g., by running "docker login".)`,
-		Flags: flag.NewFlagSet("deploy", flag.ContinueOnError),
+		Flags: flags,
 		Fn:    deploy,
 	}
 )
@@ -132,7 +135,7 @@ func deploy(ctx context.Context, args []string) error {
 	}
 
 	// Build the docker image for the deployment, and upload it to docker hub.
-	image, err := impl.BuildAndUploadDockerImage(ctx, dep, config.Image)
+	image, err := impl.BuildAndUploadDockerImage(ctx, dep, config.Image, *runInDevMode)
 	if err != nil {
 		return err
 	}
