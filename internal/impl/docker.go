@@ -20,6 +20,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"text/template"
 	"time"
 
@@ -54,9 +55,9 @@ type imageSpecs struct {
 }
 
 // BuildAndUploadDockerImage builds a docker image and upload it to docker hub.
-func BuildAndUploadDockerImage(ctx context.Context, dep *protos.Deployment, image string) (string, error) {
+func BuildAndUploadDockerImage(ctx context.Context, dep *protos.Deployment, image string, runInDevMode bool) (string, error) {
 	// Create the docker image specifications.
-	specs, err := buildImageSpecs(dep, image)
+	specs, err := buildImageSpecs(dep, image, runInDevMode)
 	if err != nil {
 		return "", fmt.Errorf("unable to build image specs: %w", err)
 	}
@@ -136,10 +137,25 @@ func uploadImage(ctx context.Context, appImage string) error {
 }
 
 // buildImageSpecs build the docker image specs for an app deployment.
-func buildImageSpecs(dep *protos.Deployment, image string) (*imageSpecs, error) {
+func buildImageSpecs(dep *protos.Deployment, image string, runInDevMode bool) (*imageSpecs, error) {
+	files := []string{dep.App.Binary}
+	goInstall := []string{"github.com/ServiceWeaver/weaver-kube/cmd/weaver-kube@latest"}
+
+	// If we run the kube deployer in the development mode, we should copy the
+	// local kube binary to the image instead.
+	if runInDevMode && runtime.GOOS == "linux" && runtime.GOARCH == "amd64" {
+		// Use the running weaver-kube tool binary.
+		toolBinPath, err := os.Executable()
+		if err != nil {
+			return nil, err
+		}
+		files = append(files, toolBinPath)
+		goInstall = []string{}
+	}
+
 	return &imageSpecs{
 		name:      fmt.Sprintf("%s:%s", image, dep.Id[:8]),
-		files:     []string{dep.App.Binary},
-		goInstall: []string{"github.com/ServiceWeaver/weaver-kube/cmd/weaver-kube@latest"},
+		files:     files,
+		goInstall: goInstall,
 	}, nil
 }
