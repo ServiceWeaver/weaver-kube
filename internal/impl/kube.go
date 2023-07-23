@@ -144,6 +144,9 @@ type KubeConfig struct {
 	// Options for the application listeners, keyed by listener name.
 	// If a listener isn't specified in the map, default options will be used.
 	Listeners map[string]*ListenerOptions
+
+	// Options for arguments of docker build
+	BuildArgs []string
 }
 
 // GenerateKubeDeployment generates the kubernetes deployment and service

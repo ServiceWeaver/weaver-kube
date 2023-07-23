@@ -52,12 +52,13 @@ type imageSpecs struct {
 	name      string   // name is the name of the image to build
 	files     []string // files that should be copied to the container
 	goInstall []string // binary targets that should be 'go install'-ed
+	buildArgs []string // arguments for docker build
 }
 
 // BuildAndUploadDockerImage builds a docker image and upload it to docker hub.
-func BuildAndUploadDockerImage(ctx context.Context, dep *protos.Deployment, image string, runInDevMode bool) (string, error) {
+func BuildAndUploadDockerImage(ctx context.Context, dep *protos.Deployment, config *KubeConfig, runInDevMode bool) (string, error) {
 	// Create the docker image specifications.
-	specs, err := buildImageSpecs(dep, image, runInDevMode)
+	specs, err := buildImageSpecs(dep, config, runInDevMode)
 	if err != nil {
 		return "", fmt.Errorf("unable to build image specs: %w", err)
 	}
@@ -115,12 +116,13 @@ func buildImage(ctx context.Context, specs *imageSpecs) error {
 	if err := dockerFile.Close(); err != nil {
 		return err
 	}
-	return dockerBuild(ctx, workDir, specs.name)
+	return dockerBuild(ctx, workDir, specs.name, specs.buildArgs...)
 }
 
 // Use docker-cli to build the docker image.
-func dockerBuild(ctx context.Context, buildContext, tag string) error {
-	c := exec.CommandContext(ctx, "docker", "build", buildContext, "-t", tag)
+func dockerBuild(ctx context.Context, buildContext, tag string, buildArgs ...string) error {
+	args := append([]string{"build", buildContext, "-t", tag}, buildArgs...)
+	c := exec.CommandContext(ctx, "docker", args...)
 	c.Stdout = os.Stdout
 	c.Stderr = os.Stderr
 	return c.Run()
@@ -137,7 +139,7 @@ func uploadImage(ctx context.Context, appImage string) error {
 }
 
 // buildImageSpecs build the docker image specs for an app deployment.
-func buildImageSpecs(dep *protos.Deployment, image string, runInDevMode bool) (*imageSpecs, error) {
+func buildImageSpecs(dep *protos.Deployment, config *KubeConfig, runInDevMode bool) (*imageSpecs, error) {
 	files := []string{dep.App.Binary}
 	goInstall := []string{"github.com/ServiceWeaver/weaver-kube/cmd/weaver-kube@latest"}
 
@@ -154,8 +156,9 @@ func buildImageSpecs(dep *protos.Deployment, image string, runInDevMode bool) (*
 	}
 
 	return &imageSpecs{
-		name:      fmt.Sprintf("%s:%s", image, dep.Id[:8]),
+		name:      fmt.Sprintf("%s:%s", config.Image, dep.Id[:8]),
 		files:     files,
 		goInstall: goInstall,
+		buildArgs: config.BuildArgs,
 	}, nil
 }

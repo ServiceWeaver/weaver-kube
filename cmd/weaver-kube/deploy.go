@@ -135,7 +135,7 @@ func deploy(ctx context.Context, args []string) error {
 	}
 
 	// Build the docker image for the deployment, and upload it to docker hub.
-	image, err := impl.BuildAndUploadDockerImage(ctx, dep, config.Image, *runInDevMode)
+	image, err := impl.BuildAndUploadDockerImage(ctx, dep, config, *runInDevMode)
 	if err != nil {
 		return err
 	}
