@@ -28,7 +28,7 @@ import (
 	"github.com/ServiceWeaver/weaver/runtime/envelope"
 	"github.com/ServiceWeaver/weaver/runtime/logging"
 	"github.com/ServiceWeaver/weaver/runtime/metrics"
-	imetrics "github.com/ServiceWeaver/weaver/runtime/prometheus"
+	"github.com/ServiceWeaver/weaver/runtime/prometheus"
 	"github.com/ServiceWeaver/weaver/runtime/protos"
 	"github.com/ServiceWeaver/weaver/runtime/traces"
 	"github.com/google/uuid"
@@ -82,7 +82,7 @@ func RunBabysitter(ctx context.Context) error {
 	}
 
 	// Create the trace exporter.
-	collector := name{cfg.Deployment.App.Name, jaegerAppName, cfg.Deployment.Id[:8]}.DNSLabel()
+	collector := name{cfg.Deployment.App.Name, jaegerAppName}.DNSLabel()
 	endpoint := fmt.Sprintf("http://%s:%d/api/traces", collector, jaegerCollectorPort)
 	traceExporter, err :=
 		jaeger.New(jaeger.WithCollectorEndpoint(jaeger.WithEndpoint(endpoint)))
@@ -127,7 +127,7 @@ func RunBabysitter(ctx context.Context) error {
 		// Read the metrics.
 		metrics := b.readMetrics()
 		var b bytes.Buffer
-		imetrics.TranslateMetricsToPrometheusTextFormat(&b, metrics, r.Host, prometheusEndpoint)
+		prometheus.TranslateMetricsToPrometheusTextFormat(&b, metrics, r.Host, prometheusEndpoint)
 		w.Write(b.Bytes()) //nolint:errcheck // response write error
 	})
 	go func() {

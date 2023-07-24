@@ -18,16 +18,15 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"strings"
 
 	"github.com/ServiceWeaver/weaver-kube/internal/proto"
 	"github.com/ServiceWeaver/weaver/runtime/bin"
 	"github.com/ServiceWeaver/weaver/runtime/protos"
-	_ "go.opentelemetry.io/otel/exporters/jaeger"
 	"golang.org/x/exp/maps"
 	appsv1 "k8s.io/api/apps/v1"
 	v1 "k8s.io/api/apps/v1"
 	v2 "k8s.io/api/autoscaling/v2"
+	_ "k8s.io/api/autoscaling/v2beta2"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -38,16 +37,6 @@ import (
 const (
 	// Name of the container that hosts the application binary.
 	appContainerName = "serviceweaver"
-
-	// Key in a Kubernetes resource's label map that corresponds to the
-	// application name that the resource is associated with. Used when looking
-	// up resources that belong to a particular application.
-	appNameKey = "serviceweaver/app_name"
-
-	// Key in Kubernetes resource's label map that corresponds to the
-	// application's deployment version. Used when looking up resources that
-	// belong to a particular application version.
-	deploymentIDKey = "serviceweaver/deployment_id"
 
 	// kubeConfigEnvKey is the name of the env variable that contains deployment
 	// information for a babysitter deployed using kube.
@@ -104,7 +93,9 @@ var (
 
 // replicaSetInfo contains information associated with a replica set.
 type replicaSetInfo struct {
-	name string // name of the replica set
+	name  string             // name of the replica set
+	image string             // name of the image to be deployed
+	dep   *protos.Deployment // deployment info
 
 	// set of the components hosted by the replica set and their listeners,
 	// keyed by component name.
@@ -146,19 +137,287 @@ type KubeConfig struct {
 	Listeners map[string]*ListenerOptions
 }
 
+// globalName returns an unique name that persists across app versions.
+func (r *replicaSetInfo) globalName() string {
+	return name{r.dep.App.Name, r.name}.DNSLabel()
+}
+
+// deploymentName returns a name that is version specific.
+func (r *replicaSetInfo) deploymentName() string {
+	return name{r.dep.App.Name, r.name, r.dep.Id[:8]}.DNSLabel()
+}
+
+// buildDeployment generates a kubernetes deployment for a replica set.
+//
+// TODO(rgrandl): test to see if it works with an app where a component foo is
+// collocated with main, and a component bar that is not collocated with main
+// calls foo.
+func (r *replicaSetInfo) buildDeployment() (*v1.Deployment, error) {
+	matchLabels := map[string]string{}
+	podLabels := map[string]string{
+		"depName": r.deploymentName(),
+		"metrics": r.dep.App.Name, // Needed by Prometheus to scrape the metrics.
+	}
+	name := r.deploymentName()
+	if r.hasListeners() {
+		name = r.globalName()
+
+		// Set the match and the pod labels, so they can be reachable across
+		// multiple app versions.
+		matchLabels["globalName"] = r.globalName()
+		podLabels["globalName"] = r.globalName()
+	} else {
+		matchLabels["depName"] = r.deploymentName()
+	}
+
+	container, err := r.buildContainer()
+	if err != nil {
+		return nil, err
+	}
+	return &appsv1.Deployment{
+		TypeMeta: metav1.TypeMeta{
+			APIVersion: "apps/v1",
+			Kind:       "Deployment",
+		},
+		ObjectMeta: metav1.ObjectMeta{Name: name},
+		Spec: appsv1.DeploymentSpec{
+			Selector: &metav1.LabelSelector{
+				MatchLabels: matchLabels,
+			},
+			Template: corev1.PodTemplateSpec{
+				ObjectMeta: metav1.ObjectMeta{
+					Labels: podLabels,
+				},
+				Spec: corev1.PodSpec{
+					Containers: []corev1.Container{container},
+				},
+			},
+			Strategy: v1.DeploymentStrategy{
+				Type:          "RollingUpdate",
+				RollingUpdate: &v1.RollingUpdateDeployment{},
+			},
+			// Number of old ReplicaSets to retain to allow rollback.
+			RevisionHistoryLimit: ptrOf(int32(1)),
+			MinReadySeconds:      int32(5),
+		},
+	}, nil
+}
+
+// buildInternalService generates a kubernetes service for a replica set that
+// is used for internal communication between weavelets.
+func (r *replicaSetInfo) buildInternalService() (*corev1.Service, error) {
+	return &corev1.Service{
+		TypeMeta: metav1.TypeMeta{
+			APIVersion: "v1",
+			Kind:       "Service",
+		},
+		ObjectMeta: metav1.ObjectMeta{Name: r.deploymentName()},
+		Spec: corev1.ServiceSpec{
+			Selector: map[string]string{
+				"depName": r.deploymentName(),
+			},
+			Ports: []corev1.ServicePort{
+				{
+					Name:       "service-port",
+					Port:       servicePort,
+					Protocol:   "TCP",
+					TargetPort: intstr.IntOrString{IntVal: int32(r.internalPort)},
+				},
+				{
+					Name:       "metrics-port",
+					Port:       metricsPort,
+					Protocol:   "TCP",
+					TargetPort: intstr.IntOrString{IntVal: int32(metricsPort)},
+				},
+			},
+		},
+	}, nil
+}
+
+// buildListenerService generates a kubernetes service for a listener.
+//
+// Note that for public listeners, we generate a Load Balancer service because
+// it has to be reachable from the outside; for internal listeners, we generate
+// a ClusterIP service, reachable only from internal Service Weaver services.
+func (r *replicaSetInfo) buildListenerService(lis *ReplicaSetConfig_Listener) (*corev1.Service, error) {
+	// Unique name that persists across app versions.
+	// TODO(rgrandl): Specify whether the listener is public in the name.
+	globalLisName := name{r.dep.App.Name, "lis", lis.Name}.DNSLabel()
+
+	var serviceType string
+	if lis.IsPublic {
+		serviceType = "LoadBalancer"
+	} else {
+		serviceType = "ClusterIP"
+	}
+
+	return &corev1.Service{
+		TypeMeta: metav1.TypeMeta{
+			APIVersion: "v1",
+			Kind:       "Service",
+		},
+		ObjectMeta: metav1.ObjectMeta{Name: globalLisName},
+		Spec: corev1.ServiceSpec{
+			Type: corev1.ServiceType(serviceType),
+			Selector: map[string]string{
+				"globalName": r.globalName(),
+			},
+			Ports: []corev1.ServicePort{
+				{
+					Port:       servicePort,
+					Protocol:   "TCP",
+					TargetPort: intstr.IntOrString{IntVal: lis.ExternalPort},
+				},
+			},
+		},
+	}, nil
+}
+
+// buildAutoscaler generates a kubernetes horizontal pod autoscaler for a replica set.
+func (r *replicaSetInfo) buildAutoscaler() (*v2.HorizontalPodAutoscaler, error) {
+	// Per deployment name that is app version specific.
+	aname := name{r.dep.App.Name, "hpa", r.name, r.dep.Id[:8]}.DNSLabel()
+
+	var depName string
+	if r.hasListeners() {
+		depName = r.globalName()
+	} else {
+		depName = r.deploymentName()
+	}
+	return &v2.HorizontalPodAutoscaler{
+		TypeMeta: metav1.TypeMeta{
+			APIVersion: "autoscaling/v2",
+			Kind:       "HorizontalPodAutoscaler",
+		},
+		ObjectMeta: metav1.ObjectMeta{Name: aname},
+		Spec: v2.HorizontalPodAutoscalerSpec{
+			ScaleTargetRef: v2.CrossVersionObjectReference{
+				APIVersion: "apps/v1",
+				Kind:       "Deployment",
+				Name:       depName,
+			},
+			MinReplicas: ptrOf(int32(1)),
+			MaxReplicas: 10,
+			Metrics: []v2.MetricSpec{
+				{
+					// The pods are scaled up/down when the average CPU
+					// utilization is above/below 80%.
+					Type: v2.ResourceMetricSourceType,
+					Resource: &v2.ResourceMetricSource{
+						Name: corev1.ResourceCPU,
+						Target: v2.MetricTarget{
+							Type:               v2.UtilizationMetricType,
+							AverageUtilization: ptrOf(int32(80)),
+						},
+					},
+				},
+			},
+		},
+	}, nil
+}
+
+// buildContainer builds a container for a replica set.
+func (r *replicaSetInfo) buildContainer() (corev1.Container, error) {
+	// Set the binary path in the deployment w.r.t. to the binary path in the
+	// docker image.
+	r.dep.App.Binary = fmt.Sprintf("/weaver/%s", filepath.Base(r.dep.App.Binary))
+	kubeCfgStr, err := proto.ToEnv(&ReplicaSetConfig{
+		Deployment:        r.dep,
+		ReplicaSet:        r.name,
+		ComponentsToStart: r.components,
+		InternalPort:      int32(r.internalPort),
+	})
+	if err != nil {
+		return corev1.Container{}, err
+	}
+	return corev1.Container{
+		Name:            appContainerName,
+		Image:           r.image,
+		ImagePullPolicy: corev1.PullIfNotPresent,
+		Args:            []string{"babysitter"},
+		Env: []corev1.EnvVar{
+			{Name: kubeConfigEnvKey, Value: kubeCfgStr},
+		},
+		Resources: corev1.ResourceRequirements{
+			// NOTE: start with the smallest allowed limits, and count on autoscalers
+			// doing the rest.
+			//
+			// NOTE: if we don't specify the minimum amount of compute resources
+			// required, the autoscaler doesn't work properly, because the metric
+			// server is not able to report the resource usage of the container.
+			Requests: corev1.ResourceList{
+				"memory": memoryUnit,
+				"cpu":    cpuUnit,
+			},
+			// NOTE: we don't specify any limits, allowing all available node
+			// resources to be used, if needed. Note that in practice, we
+			// attach autoscalers to all of our containers, so the extra-usage
+			// should be only for a short period of time.
+		},
+
+		// Expose the metrics port from the container, so it can be discoverable for
+		// scraping by Prometheus.
+		Ports: []corev1.ContainerPort{{ContainerPort: metricsPort}},
+
+		// Enabling TTY and Stdin allows the user to run a shell inside the container,
+		// for debugging.
+		TTY:   true,
+		Stdin: true,
+	}, nil
+}
+
+// hasListeners returns whether a given replica set exports any listeners.
+func (r *replicaSetInfo) hasListeners() bool {
+	for _, listeners := range r.components {
+		if listeners.Listeners != nil {
+			return true
+		}
+	}
+	return false
+}
+
 // GenerateKubeDeployment generates the kubernetes deployment and service
 // information for a given app deployment.
+//
+// Note that for each application, we generate the following Kubernetes topology:
+//
+//   - for each replica set that has at least a listener, we generate a deployment
+//     whose name is persistent across new app versions rollouts. Note that in
+//     general this should only be the replica set that contains the main component.
+//     We do this because by default we rely on RollingUpdate as a deployment
+//     strategy to rollout new versions of the app. RollingUpdate will update the
+//     existing pods for the replica set with the new version one by one, hence
+//     the new application version is being deployed.
+//     For example, let's assume that we have an app v1 with 2 replica sets main
+//     and foo. main is the replica set that contains the public listener, and it
+//     has 2 replicas. Next, we deploy the version v2 of the app. v2 will be
+//     rolled out as follows:
+//
+//     [main v1] [main v1]     [main v1] [main v2]     [main v2] [main v2]
+//     |            |          |         |             |         |
+//     v            |       => v         v         =>  |         v
+//     [foo v1] <---|          [foo v1]  [foo v2]      |-------> [foo v2]
+//
+//   - for all the replica sets, we create a per app version service so components
+//     within an app version can communicate with each other.
+//
+//   - for all the listeners we create a load balancer or a cluster IP with an
+//     unique name that is persistent across new app version rollouts.
+//
+//   - if Prometheus/Jaeger are enabled, we deploy corresponding services using
+//     unique names as well s.t., we don't rollout new instances of Prometheus/Jaeger,
+//     when we rollout new versions of the app.
 func GenerateKubeDeployment(image string, dep *protos.Deployment, cfg *KubeConfig) error {
 	fmt.Fprintf(os.Stderr, greenText(), "\nGenerating kube deployment info ...")
 
 	// Generate the kubernetes replica sets for the deployment.
-	replicaSets, err := buildReplicaSetSpecs(dep, cfg)
+	replicaSets, err := buildReplicaSetSpecs(dep, image, cfg)
 	if err != nil {
 		return fmt.Errorf("unable to create replica sets: %w", err)
 	}
 
 	// Generate the app deployment info.
-	content, err := generateAppDeployment(replicaSets, image, dep)
+	content, err := generateAppDeployment(replicaSets)
 	if err != nil {
 		return fmt.Errorf("unable to create kube app deployment: %w", err)
 	}
@@ -173,7 +432,7 @@ func GenerateKubeDeployment(image string, dep *protos.Deployment, cfg *KubeConfi
 	generated = append(generated, content...)
 
 	// Generate the Prometheus deployment info.
-	content, err = generatePrometheusDeployment(maps.Values(replicaSets), dep)
+	content, err = generatePrometheusDeployment(dep)
 	if err != nil {
 		return fmt.Errorf("unable to create kube deployment for the Prometheus service: %w", err)
 	}
@@ -196,58 +455,58 @@ func GenerateKubeDeployment(image string, dep *protos.Deployment, cfg *KubeConfi
 
 // generateAppDeployment generates the kubernetes deployment and service
 // information for a given app deployment.
-func generateAppDeployment(replicaSets map[string]*replicaSetInfo, image string, dep *protos.Deployment) ([]byte, error) {
+func generateAppDeployment(replicaSets map[string]*replicaSetInfo) ([]byte, error) {
 	var generated []byte
 
 	// For each replica set, build a deployment and a service. If a replica set
 	// has any listeners, build a service for each listener.
-	for _, rsc := range replicaSets {
+	for _, rs := range replicaSets {
 		// Build a deployment.
-		d, err := buildDeployment(rsc, dep, image)
+		d, err := rs.buildDeployment()
 		if err != nil {
-			return nil, fmt.Errorf("unable to create kube deployment for replica set %s: %w", rsc.name, err)
+			return nil, fmt.Errorf("unable to create kube deployment for replica set %s: %w", rs.name, err)
 		}
 		content, err := yaml.Marshal(d)
 		if err != nil {
 			return nil, err
 		}
-		generated = append(generated, []byte(fmt.Sprintf("# Deployment for replica set %s\n", rsc.name))...)
+		generated = append(generated, []byte(fmt.Sprintf("# Deployment for replica set %s\n", rs.name))...)
 		generated = append(generated, content...)
 		generated = append(generated, []byte("\n---\n")...)
-		fmt.Fprintf(os.Stderr, "Generated kube deployment for replica set %v\n", rsc.name)
+		fmt.Fprintf(os.Stderr, "Generated kube deployment for replica set %v\n", rs.name)
 
 		// Build a horizontal pod autoscaler for the deployment.
-		a, err := buildAutoscaler(rsc, dep)
+		a, err := rs.buildAutoscaler()
 		if err != nil {
-			return nil, fmt.Errorf("unable to create kube autoscaler for replica set %s: %w", rsc.name, err)
+			return nil, fmt.Errorf("unable to create kube autoscaler for replica set %s: %w", rs.name, err)
 		}
 		content, err = yaml.Marshal(a)
 		if err != nil {
 			return nil, err
 		}
-		generated = append(generated, []byte(fmt.Sprintf("\n# Autoscaler for replica set %s\n", rsc.name))...)
+		generated = append(generated, []byte(fmt.Sprintf("\n# Autoscaler for replica set %s\n", rs.name))...)
 		generated = append(generated, content...)
 		generated = append(generated, []byte("\n---\n")...)
-		fmt.Fprintf(os.Stderr, "Generated kube autoscaler for replica set %v\n", rsc.name)
+		fmt.Fprintf(os.Stderr, "Generated kube autoscaler for replica set %v\n", rs.name)
 
-		// Build a service.
-		s, err := buildService(rsc, dep)
+		// Build a service to enable internal communication between the weavelets.
+		s, err := rs.buildInternalService()
 		if err != nil {
-			return nil, fmt.Errorf("unable to create kube service for replica set %s: %w", rsc.name, err)
+			return nil, fmt.Errorf("unable to create kube service for replica set %s: %w", rs.name, err)
 		}
 		content, err = yaml.Marshal(s)
 		if err != nil {
 			return nil, err
 		}
-		generated = append(generated, []byte(fmt.Sprintf("\n# Service for replica set %s\n", rsc.name))...)
+		generated = append(generated, []byte(fmt.Sprintf("\n# Service for replica set %s\n", rs.name))...)
 		generated = append(generated, content...)
 		generated = append(generated, []byte("\n---\n")...)
-		fmt.Fprintf(os.Stderr, "Generated kube service for replica set %v\n", rsc.name)
+		fmt.Fprintf(os.Stderr, "Generated kube service for replica set %v\n", rs.name)
 
 		// Build a service for each listener.
-		for _, listeners := range rsc.components {
+		for _, listeners := range rs.components {
 			for _, lis := range listeners.Listeners {
-				ls, err := buildListenerService(rsc, lis, dep)
+				ls, err := rs.buildListenerService(lis)
 				if err != nil {
 					return nil, fmt.Errorf("unable to create kube listener service for %s: %w", lis.Name, err)
 				}
@@ -255,7 +514,7 @@ func generateAppDeployment(replicaSets map[string]*replicaSetInfo, image string,
 				if err != nil {
 					return nil, err
 				}
-				generated = append(generated, []byte(fmt.Sprintf("\n# Listener Service for replica set %s\n", rsc.name))...)
+				generated = append(generated, []byte(fmt.Sprintf("\n# Listener Service for replica set %s\n", rs.name))...)
 				generated = append(generated, content...)
 				generated = append(generated, []byte("\n---\n")...)
 				fmt.Fprintf(os.Stderr, "Generated kube listener service for listener %v\n", lis.Name)
@@ -268,8 +527,14 @@ func generateAppDeployment(replicaSets map[string]*replicaSetInfo, image string,
 
 // generateJaegerDeployment generates the Jaeger kubernetes deployment and service
 // information for a given app deployment.
+//
+// Note that we run a single instance of Jaeger. This is because we are using
+// a Jaeger image that combines three Jaeger components, agent, collector, and
+// query service/UI in a single image.
+// TODO(rgrandl): If the trace volume can't be handled by a single instance, we
+// should scale these components independently, and use different image(s).
 func generateJaegerDeployment(dep *protos.Deployment) ([]byte, error) {
-	name := name{dep.App.Name, jaegerAppName, dep.Id[:8]}.DNSLabel()
+	jname := name{dep.App.Name, jaegerAppName}.DNSLabel()
 
 	// Generate the Jaeger deployment.
 	d := &appsv1.Deployment{
@@ -277,34 +542,33 @@ func generateJaegerDeployment(dep *protos.Deployment) ([]byte, error) {
 			APIVersion: "apps/v1",
 			Kind:       "Deployment",
 		},
-		ObjectMeta: metav1.ObjectMeta{
-			Name:   name,
-			Labels: map[string]string{deploymentIDKey: dep.Id},
-		},
+		ObjectMeta: metav1.ObjectMeta{Name: jname},
 		Spec: appsv1.DeploymentSpec{
 			Replicas: ptrOf(int32(1)),
 			Selector: &metav1.LabelSelector{
 				MatchLabels: map[string]string{
-					"app":    name,
-					"dep_id": dep.Id,
+					"jaeger": jname,
 				},
 			},
 			Template: corev1.PodTemplateSpec{
 				ObjectMeta: metav1.ObjectMeta{
 					Labels: map[string]string{
-						"app":    name,
-						"dep_id": dep.Id,
+						"jaeger": jname,
 					},
 				},
 				Spec: corev1.PodSpec{
 					Containers: []corev1.Container{
 						{
-							Name:            name,
+							Name:            jname,
 							Image:           fmt.Sprintf("%s:latest", jaegerImageName),
 							ImagePullPolicy: corev1.PullIfNotPresent,
 						},
 					},
 				},
+			},
+			Strategy: v1.DeploymentStrategy{
+				Type:          "RollingUpdate",
+				RollingUpdate: &v1.RollingUpdateDeployment{},
 			},
 		},
 	}
@@ -324,15 +588,9 @@ func generateJaegerDeployment(dep *protos.Deployment) ([]byte, error) {
 			APIVersion: "v1",
 			Kind:       "Service",
 		},
-		ObjectMeta: metav1.ObjectMeta{
-			Name:   name,
-			Labels: map[string]string{deploymentIDKey: dep.Id},
-		},
+		ObjectMeta: metav1.ObjectMeta{Name: jname},
 		Spec: corev1.ServiceSpec{
-			Selector: map[string]string{
-				"app":    name,
-				"dep_id": dep.Id,
-			},
+			Selector: map[string]string{"jaeger": jname},
 			Ports: []corev1.ServicePort{
 				{
 					Name:       "ui-port",
@@ -357,6 +615,7 @@ func generateJaegerDeployment(dep *protos.Deployment) ([]byte, error) {
 	generated = append(generated, content...)
 	generated = append(generated, []byte("\n---\n")...)
 	fmt.Fprintf(os.Stderr, "Generated Jaeger service\n")
+
 	return generated, nil
 }
 
@@ -364,35 +623,37 @@ func generateJaegerDeployment(dep *protos.Deployment) ([]byte, error) {
 // a Prometheus service for a given app deployment.
 //
 // TODO(rgrandl): check if we can simplify the config map, and the deployment info.
-func generatePrometheusDeployment(rs []*replicaSetInfo, dep *protos.Deployment) ([]byte, error) {
-	cname := name{dep.App.Name, "prometheus", "config", dep.Id[:8]}.DNSLabel()
-	pname := name{dep.App.Name, "prometheus", dep.Id[:8]}.DNSLabel()
+//
+// TODO(rgrandl): We run a single instance of Prometheus for now. We might want
+// to scale it up if it becomes a bottleneck.
+func generatePrometheusDeployment(dep *protos.Deployment) ([]byte, error) {
+	cname := name{dep.App.Name, "prometheus", "config"}.DNSLabel()
+	pname := name{dep.App.Name, "prometheus"}.DNSLabel()
 
-	// Build the list of monitoring targets that should be scraped by Prometheus.
-	var targetsStr []string
-	for _, r := range rs {
-		tname := fmt.Sprintf("\n\"%s:%d\"", name{dep.App.Name, r.name, dep.Id[:8]}.DNSLabel(), metricsPort)
-		targetsStr = append(targetsStr, tname)
-	}
-	// Build the config map that holds the prometheus configuration file.
+	// Build the config map that holds the prometheus configuration file. In the
+	// config we specify how to scrape the app pods for the metrics.
 	config := fmt.Sprintf(`
 global:
   scrape_interval: 15s
 scrape_configs:
   - job_name: "%s"
-    metrics_path: /metrics
-    static_configs:
-      - targets: [%v]
-`, pname, strings.Join(targetsStr, ","))
+    metrics_path: %s
+    kubernetes_sd_configs:
+      - role: pod
+    scheme: http
+    relabel_configs:
+      - source_labels: [__meta_kubernetes_pod_label_metrics]
+        regex: "%s"
+        action: keep
+`, pname, prometheusEndpoint, dep.App.Name)
 
+	// Create a config map to store the prometheus config.
 	cm := corev1.ConfigMap{
 		TypeMeta: metav1.TypeMeta{
 			Kind:       "ConfigMap",
 			APIVersion: "v1",
 		},
-		ObjectMeta: metav1.ObjectMeta{
-			Name: cname,
-		},
+		ObjectMeta: metav1.ObjectMeta{Name: cname},
 		Data: map[string]string{
 			"prometheus.yaml": config,
 		},
@@ -413,17 +674,15 @@ scrape_configs:
 			APIVersion: "apps/v1",
 			Kind:       "Deployment",
 		},
-		ObjectMeta: metav1.ObjectMeta{
-			Name: pname,
-		},
+		ObjectMeta: metav1.ObjectMeta{Name: pname},
 		Spec: appsv1.DeploymentSpec{
 			Replicas: ptrOf(int32(1)),
 			Selector: &metav1.LabelSelector{
-				MatchLabels: map[string]string{"app": pname},
+				MatchLabels: map[string]string{"prometheus": pname},
 			},
 			Template: corev1.PodTemplateSpec{
 				ObjectMeta: metav1.ObjectMeta{
-					Labels: map[string]string{"app": pname},
+					Labels: map[string]string{"prometheus": pname},
 				},
 				Spec: corev1.PodSpec{
 					Containers: []corev1.Container{
@@ -472,6 +731,10 @@ scrape_configs:
 					},
 				},
 			},
+			Strategy: v1.DeploymentStrategy{
+				Type:          "RollingUpdate",
+				RollingUpdate: &v1.RollingUpdateDeployment{},
+			},
 		},
 	}
 	content, err = yaml.Marshal(d)
@@ -491,7 +754,7 @@ scrape_configs:
 		},
 		ObjectMeta: metav1.ObjectMeta{Name: pname},
 		Spec: corev1.ServiceSpec{
-			Selector: map[string]string{"app": pname},
+			Selector: map[string]string{"prometheus": pname},
 			Ports: []corev1.ServicePort{
 				{
 					Port:       servicePort,
@@ -512,220 +775,10 @@ scrape_configs:
 	return generated, nil
 }
 
-// buildDeployment generates a kubernetes deployment for a replica set.
-func buildDeployment(rs *replicaSetInfo, dep *protos.Deployment, image string) (*v1.Deployment, error) {
-	name := name{dep.App.Name, rs.name, dep.Id[:8]}.DNSLabel()
-	container, err := buildContainer(image, rs, dep)
-	if err != nil {
-		return nil, err
-	}
-	return &appsv1.Deployment{
-		TypeMeta: metav1.TypeMeta{
-			APIVersion: "apps/v1",
-			Kind:       "Deployment",
-		},
-		ObjectMeta: metav1.ObjectMeta{
-			Name: name,
-			Labels: map[string]string{
-				appNameKey:      dep.App.Name,
-				deploymentIDKey: dep.Id,
-			},
-		},
-		Spec: appsv1.DeploymentSpec{
-			Selector: &metav1.LabelSelector{
-				MatchLabels: map[string]string{
-					"app":      name,
-					"app_name": dep.App.Name,
-					"dep_id":   dep.Id,
-				},
-			},
-			Template: corev1.PodTemplateSpec{
-				ObjectMeta: metav1.ObjectMeta{
-					Labels: map[string]string{
-						"app":      name,
-						"app_name": dep.App.Name,
-						"dep_id":   dep.Id,
-					},
-				},
-				Spec: corev1.PodSpec{
-					Containers: []corev1.Container{container},
-				},
-			},
-		},
-	}, nil
-}
-
-// buildService generates a kubernetes service for a replica set.
-func buildService(rs *replicaSetInfo, dep *protos.Deployment) (*corev1.Service, error) {
-	name := name{dep.App.Name, rs.name, dep.Id[:8]}.DNSLabel()
-	return &corev1.Service{
-		TypeMeta: metav1.TypeMeta{
-			APIVersion: "v1",
-			Kind:       "Service",
-		},
-		ObjectMeta: metav1.ObjectMeta{
-			Name: name,
-			Labels: map[string]string{
-				appNameKey:      dep.App.Name,
-				deploymentIDKey: dep.Id,
-			},
-		},
-		Spec: corev1.ServiceSpec{
-			Selector: map[string]string{
-				"app":      name,
-				"app_name": dep.App.Name,
-				"dep_id":   dep.Id,
-			},
-			Ports: []corev1.ServicePort{
-				{
-					Name:       "service-port",
-					Port:       servicePort,
-					Protocol:   "TCP",
-					TargetPort: intstr.IntOrString{IntVal: int32(rs.internalPort)},
-				},
-				{
-					Name:       "metrics-port",
-					Port:       metricsPort,
-					Protocol:   "TCP",
-					TargetPort: intstr.IntOrString{IntVal: int32(metricsPort)},
-				},
-			},
-		},
-	}, nil
-}
-
-// buildService generates a kubernetes service for a listener.
-//
-// Note that for public listeners, we generate a Load Balancer service because
-// it has to be reachable from the outside; for internal listeners, we generate
-// a ClusterIP service, reachable only from internal Service Weaver services.
-func buildListenerService(rs *replicaSetInfo, lis *ReplicaSetConfig_Listener, dep *protos.Deployment) (*corev1.Service, error) {
-	appName := name{dep.App.Name, rs.name, dep.Id[:8]}.DNSLabel()
-	lisName := name{dep.App.Name, "lis", rs.name, dep.Id[:8]}.DNSLabel()
-	var serviceType string
-	if lis.IsPublic {
-		serviceType = "LoadBalancer"
-	} else {
-		serviceType = "ClusterIP"
-	}
-	return &corev1.Service{
-		TypeMeta: metav1.TypeMeta{
-			APIVersion: "v1",
-			Kind:       "Service",
-		},
-
-		ObjectMeta: metav1.ObjectMeta{
-			Name: lisName,
-			Labels: map[string]string{
-				appNameKey:      dep.App.Name,
-				deploymentIDKey: dep.Id,
-			},
-		},
-		Spec: corev1.ServiceSpec{
-			Type: corev1.ServiceType(serviceType),
-			Selector: map[string]string{
-				"app":      appName,
-				"app_name": dep.App.Name,
-				"dep_id":   dep.Id,
-			},
-			Ports: []corev1.ServicePort{
-				{
-					Port:       servicePort,
-					Protocol:   "TCP",
-					TargetPort: intstr.IntOrString{IntVal: lis.ExternalPort},
-				},
-			},
-		},
-	}, nil
-}
-
-// buildAutoscaler generates a kubernetes horizontal pod autoscaler for a replica set.
-func buildAutoscaler(rs *replicaSetInfo, dep *protos.Deployment) (*v2.HorizontalPodAutoscaler, error) {
-	aname := name{dep.App.Name, "hpa", rs.name, dep.Id[:8]}.DNSLabel()
-	depName := name{dep.App.Name, rs.name, dep.Id[:8]}.DNSLabel()
-	return &v2.HorizontalPodAutoscaler{
-		TypeMeta: metav1.TypeMeta{
-			APIVersion: "autoscaling/v2",
-			Kind:       "HorizontalPodAutoscaler",
-		},
-		ObjectMeta: metav1.ObjectMeta{
-			Name: aname,
-		},
-		Spec: v2.HorizontalPodAutoscalerSpec{
-			ScaleTargetRef: v2.CrossVersionObjectReference{
-				APIVersion: "apps/v1",
-				Kind:       "Deployment",
-				Name:       depName,
-			},
-			MinReplicas: ptrOf(int32(1)),
-			MaxReplicas: 10,
-			Metrics: []v2.MetricSpec{
-				{
-					// The pods are scaled up/down when the average CPU
-					// utilization is above/below 80%.
-					Type: v2.ResourceMetricSourceType,
-					Resource: &v2.ResourceMetricSource{
-						Name: corev1.ResourceCPU,
-						Target: v2.MetricTarget{
-							Type:               v2.UtilizationMetricType,
-							AverageUtilization: ptrOf(int32(80)),
-						},
-					},
-				},
-			},
-		},
-	}, nil
-}
-
-// buildContainer builds a container for a replica set.
-func buildContainer(dockerImage string, rs *replicaSetInfo, dep *protos.Deployment) (corev1.Container, error) {
-	// Set the binary path in the deployment w.r.t. to the binary path in the
-	// docker image.
-	dep.App.Binary = fmt.Sprintf("/weaver/%s", filepath.Base(dep.App.Binary))
-	kubeCfgStr, err := proto.ToEnv(&ReplicaSetConfig{
-		Deployment:        dep,
-		ReplicaSet:        rs.name,
-		ComponentsToStart: rs.components,
-		InternalPort:      int32(rs.internalPort),
-	})
-	if err != nil {
-		return corev1.Container{}, err
-	}
-	return corev1.Container{
-		Name:            appContainerName,
-		Image:           dockerImage,
-		ImagePullPolicy: corev1.PullIfNotPresent,
-		Args:            []string{"babysitter"},
-		Env: []corev1.EnvVar{
-			{Name: kubeConfigEnvKey, Value: kubeCfgStr},
-		},
-		Resources: corev1.ResourceRequirements{
-			// NOTE: start with smallest allowed limits, and count on autoscalers
-			// doing the rest.
-			//
-			// NOTE: if we don't specify the minimum amount of compute resources
-			// required, the autoscaler doesn't work properly, because the metric
-			// server is not able to report the resource usage of the container.
-			Requests: corev1.ResourceList{
-				"memory": memoryUnit,
-				"cpu":    cpuUnit,
-			},
-			// NOTE: we don't specify any limits, allowing all available node
-			// resources to be used, if needed. Note that in practice, we
-			// attach autoscalers to all of our containers, so the extra-usage
-			// should be only for a short period of time.
-		},
-
-		// Enabling TTY and Stdin allows the user to run a shell inside the container,
-		// for debugging.
-		TTY:   true,
-		Stdin: true,
-	}, nil
-}
-
 // buildReplicaSetSpecs returns the replica sets specs for the deployment dep
 // keyed by the replica set.
-func buildReplicaSetSpecs(dep *protos.Deployment, cfg *KubeConfig) (map[string]*replicaSetInfo, error) {
+func buildReplicaSetSpecs(dep *protos.Deployment, image string, cfg *KubeConfig) (
+	map[string]*replicaSetInfo, error) {
 	rsets := map[string]*replicaSetInfo{}
 
 	// Retrieve the components from the binary.
@@ -740,6 +793,8 @@ func buildReplicaSetSpecs(dep *protos.Deployment, cfg *KubeConfig) (map[string]*
 		if _, found := rsets[rsName]; !found {
 			rsets[rsName] = &replicaSetInfo{
 				name:         rsName,
+				image:        image,
+				dep:          dep,
 				components:   map[string]*ReplicaSetConfig_Listeners{},
 				internalPort: internalPort,
 			}
