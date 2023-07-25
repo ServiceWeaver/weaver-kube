@@ -3,7 +3,7 @@ module github.com/ServiceWeaver/weaver-kube
 go 1.21
 
 require (
-	github.com/ServiceWeaver/weaver v0.17.1-0.20230721230105-3d5e307bba63
+	github.com/ServiceWeaver/weaver v0.18.0
 	github.com/google/uuid v1.3.0
 	go.opentelemetry.io/otel/exporters/jaeger v1.16.0
 	go.opentelemetry.io/otel/sdk v1.16.0
@@ -32,7 +32,6 @@ require (
 	github.com/remyoudompheng/bigfft v0.0.0-20230129092748-24d4a6f8daec // indirect
 	github.com/stoewer/go-strcase v1.2.0 // indirect
 	go.opentelemetry.io/otel v1.16.0 // indirect
-	go.opentelemetry.io/otel/exporters/stdout/stdouttrace v1.16.0 // indirect
 	go.opentelemetry.io/otel/metric v1.16.0 // indirect
 	go.opentelemetry.io/otel/trace v1.16.0 // indirect
 	golang.org/x/mod v0.12.0 // indirect
