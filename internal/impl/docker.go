@@ -24,6 +24,7 @@ import (
 	"text/template"
 	"time"
 
+	"github.com/ServiceWeaver/weaver-kube/internal/version"
 	"github.com/ServiceWeaver/weaver/runtime/protos"
 	"github.com/google/uuid"
 )
@@ -139,7 +140,10 @@ func uploadImage(ctx context.Context, appImage string) error {
 // buildImageSpecs build the docker image specs for an app deployment.
 func buildImageSpecs(dep *protos.Deployment, image string, runInDevMode bool) (*imageSpecs, error) {
 	files := []string{dep.App.Binary}
-	goInstall := []string{"github.com/ServiceWeaver/weaver-kube/cmd/weaver-kube@latest"}
+	toolVersion := fmt.Sprintf("v%d.%d.%d", version.Major, version.Minor, version.Patch)
+	goInstall := []string{
+		"github.com/ServiceWeaver/weaver-kube/cmd/weaver-kube@" + toolVersion,
+	}
 
 	// If we run the kube deployer in the development mode, we should copy the
 	// local kube binary to the image instead.
