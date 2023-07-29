@@ -15,6 +15,7 @@
 package impl
 
 import (
+	"bytes"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -28,6 +29,7 @@ import (
 	v2 "k8s.io/api/autoscaling/v2"
 	_ "k8s.io/api/autoscaling/v2beta2"
 	corev1 "k8s.io/api/core/v1"
+	rbacv1 "k8s.io/api/rbac/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/intstr"
@@ -76,10 +78,12 @@ const (
 	metricsPort = 9090
 )
 
-var (
-	// Start value for ports used by the weavelets to listen for internal traffic.
-	internalPort = 10000
+// Port used by the weavelets to listen for internal traffic.
+//
+// TODO(mwhittaker): Remove internal port from kube.proto.
+const internalPort = 10000
 
+var (
 	// Start value for ports used by the public and private listeners.
 	externalPort = 20000
 
@@ -205,6 +209,8 @@ func (r *replicaSetInfo) buildDeployment() (*v1.Deployment, error) {
 
 // buildInternalService generates a kubernetes service for a replica set that
 // is used for internal communication between weavelets.
+//
+// TODO(mwhittaker): Double check that this code is unused and delete it.
 func (r *replicaSetInfo) buildInternalService() (*corev1.Service, error) {
 	return &corev1.Service{
 		TypeMeta: metav1.TypeMeta{
@@ -410,6 +416,14 @@ func (r *replicaSetInfo) hasListeners() bool {
 func GenerateKubeDeployment(image string, dep *protos.Deployment, cfg *KubeConfig) error {
 	fmt.Fprintf(os.Stderr, greenText(), "\nGenerating kube deployment info ...")
 
+	// Generate roles and role bindings.
+	var generated []byte
+	content, err := generateRolesAndBindings()
+	if err != nil {
+		return fmt.Errorf("unable to generate roles and bindings: %w", err)
+	}
+	generated = append(generated, content...)
+
 	// Generate the kubernetes replica sets for the deployment.
 	replicaSets, err := buildReplicaSetSpecs(dep, image, cfg)
 	if err != nil {
@@ -417,11 +431,10 @@ func GenerateKubeDeployment(image string, dep *protos.Deployment, cfg *KubeConfi
 	}
 
 	// Generate the app deployment info.
-	content, err := generateAppDeployment(replicaSets)
+	content, err = generateAppDeployment(replicaSets)
 	if err != nil {
 		return fmt.Errorf("unable to create kube app deployment: %w", err)
 	}
-	var generated []byte
 	generated = append(generated, content...)
 
 	// Generate the Jaeger deployment info.
@@ -451,6 +464,74 @@ func GenerateKubeDeployment(image string, dep *protos.Deployment, cfg *KubeConfi
 	}
 	fmt.Fprintf(os.Stderr, greenText(), fmt.Sprintf("kube deployment information successfully generated in %s", yamlFile))
 	return nil
+}
+
+// generateRolesAndBindings generates Kubernetes roles and role bindings that
+// grant permissions to the appropriate service accounts.
+func generateRolesAndBindings() ([]byte, error) {
+	// Grant the default service account the permission to get, list, and watch
+	// pods. The babysitter watches pods to generate routing info.
+	//
+	// TODO(mwhittaker): This leaks permissions to the user's code. We should
+	// avoid that. We might have to run the babysitter and weavelet in separate
+	// containers or pods.
+	role := rbacv1.Role{
+		TypeMeta: metav1.TypeMeta{
+			APIVersion: "rbac.authorization.k8s.io/v1",
+			Kind:       "Role",
+		},
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "pods-getter",
+		},
+		Rules: []rbacv1.PolicyRule{
+			{
+				APIGroups: []string{""},
+				Resources: []string{"pods"},
+				Verbs:     []string{"get", "list", "watch"},
+			},
+		},
+	}
+
+	binding := rbacv1.RoleBinding{
+		TypeMeta: metav1.TypeMeta{
+			APIVersion: "rbac.authorization.k8s.io/v1",
+			Kind:       "RoleBinding",
+		},
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "default-pods-getter",
+		},
+		RoleRef: rbacv1.RoleRef{
+			APIGroup: "rbac.authorization.k8s.io",
+			Kind:     "Role",
+			Name:     "pods-getter",
+		},
+		Subjects: []rbacv1.Subject{
+			{
+				Kind: "ServiceAccount",
+				Name: "default",
+			},
+		},
+	}
+
+	var b bytes.Buffer
+	fmt.Fprintln(&b, "# Roles and bindings.")
+
+	bytes, err := yaml.Marshal(role)
+	if err != nil {
+		return nil, err
+	}
+	b.Write(bytes)
+	fmt.Fprintf(&b, "\n---\n\n")
+
+	bytes, err = yaml.Marshal(binding)
+	if err != nil {
+		return nil, err
+	}
+	b.Write(bytes)
+	fmt.Fprintf(&b, "\n---\n\n")
+
+	fmt.Fprintf(os.Stderr, "Generated roles and bindings\n")
+	return b.Bytes(), nil
 }
 
 // generateAppDeployment generates the kubernetes deployment and service
@@ -798,7 +879,6 @@ func buildReplicaSetSpecs(dep *protos.Deployment, image string, cfg *KubeConfig)
 				components:   map[string]*ReplicaSetConfig_Listeners{},
 				internalPort: internalPort,
 			}
-			internalPort++
 		}
 
 		rsets[rsName].components[c] = listeners
