@@ -164,31 +164,46 @@ func RunBabysitter(ctx context.Context) error {
 
 // ActivateComponent implements the envelope.EnvelopeHandler interface.
 func (b *babysitter) ActivateComponent(_ context.Context, request *protos.ActivateComponentRequest) (*protos.ActivateComponentReply, error) {
+	go func() {
+		if err := b.watchPods(b.ctx, request.Component); err != nil {
+			// TODO(mwhittaker): Log this error.
+			fmt.Fprintf(os.Stderr, "watchPods(%q): %v", request.Component, err)
+		}
+	}()
+	return &protos.ActivateComponentReply{}, nil
+}
+
+// watchPods watches the pods hosting the provided component, updating the
+// routing info whenever the set of pods changes.
+func (b *babysitter) watchPods(ctx context.Context, component string) error {
 	b.mu.Lock()
-	defer b.mu.Unlock()
-	if _, ok := b.watching[request.Component]; ok {
-		return &protos.ActivateComponentReply{}, nil
+	if _, ok := b.watching[component]; ok {
+		// The pods for this component are already being watched.
+		b.mu.Unlock()
+		return nil
 	}
+	b.watching[component] = struct{}{}
+	b.mu.Unlock()
 
 	// Watch the pods running the requested component.
-	rs := replicaSet(request.Component, b.cfg.Deployment)
+	rs := replicaSet(component, b.cfg.Deployment)
 	name := name{b.cfg.Deployment.App.Name, rs, b.cfg.Deployment.Id[:8]}.DNSLabel()
 	opts := metav1.ListOptions{LabelSelector: fmt.Sprintf("depName=%s", name)}
-	watcher, err := b.clientset.CoreV1().Pods("default").Watch(b.ctx, opts)
+	watcher, err := b.clientset.CoreV1().Pods("default").Watch(ctx, opts)
 	if err != nil {
-		return nil, fmt.Errorf("watch pods for component %s: %w", request.Component, err)
+		return fmt.Errorf("watch pods for component %s: %w", component, err)
 	}
 
-	go func() {
-		<-b.ctx.Done()
-		watcher.Stop()
-	}()
-	go func() {
-		addrs := map[string]string{}
-		for {
-			event, ok := <-watcher.ResultChan()
+	addrs := map[string]string{}
+	for {
+		select {
+		case <-ctx.Done():
+			watcher.Stop()
+			return ctx.Err()
+
+		case event, ok := <-watcher.ResultChan():
 			if !ok {
-				return
+				return nil
 			}
 
 			changed := false
@@ -201,8 +216,10 @@ func (b *babysitter) ActivateComponent(_ context.Context, request *protos.Activa
 				}
 			case watch.Deleted:
 				pod := event.Object.(*v1.Pod)
-				delete(addrs, pod.Name)
-				changed = true
+				if _, ok := addrs[pod.Name]; ok {
+					delete(addrs, pod.Name)
+					changed = true
+				}
 			}
 
 			if changed {
@@ -211,7 +228,7 @@ func (b *babysitter) ActivateComponent(_ context.Context, request *protos.Activa
 					replicas = append(replicas, fmt.Sprintf("tcp://%s:%d", addr, internalPort))
 				}
 				routingInfo := &protos.RoutingInfo{
-					Component: request.Component,
+					Component: component,
 					Replicas:  replicas,
 				}
 				if err := b.envelope.UpdateRoutingInfo(routingInfo); err != nil {
@@ -220,9 +237,7 @@ func (b *babysitter) ActivateComponent(_ context.Context, request *protos.Activa
 				}
 			}
 		}
-	}()
-	b.watching[request.Component] = struct{}{}
-	return &protos.ActivateComponentReply{}, nil
+	}
 }
 
 // GetListenerAddress implements the envelope.EnvelopeHandler interface.
