@@ -194,6 +194,9 @@ func (b *babysitter) watchPods(ctx context.Context, component string) error {
 		return fmt.Errorf("watch pods for component %s: %w", component, err)
 	}
 
+	// Repeatedly receive events from Kubernetes, updating the set of pod
+	// addresses appropriately. Abort when the channel is closed or the context
+	// is canceled.
 	addrs := map[string]string{}
 	for {
 		select {
@@ -221,20 +224,21 @@ func (b *babysitter) watchPods(ctx context.Context, component string) error {
 					changed = true
 				}
 			}
+			if !changed {
+				continue
+			}
 
-			if changed {
-				replicas := []string{}
-				for _, addr := range addrs {
-					replicas = append(replicas, fmt.Sprintf("tcp://%s:%d", addr, internalPort))
-				}
-				routingInfo := &protos.RoutingInfo{
-					Component: component,
-					Replicas:  replicas,
-				}
-				if err := b.envelope.UpdateRoutingInfo(routingInfo); err != nil {
-					// TODO(mwhittaker): Log this error.
-					fmt.Fprintf(os.Stderr, "UpdateRoutingInfo(%v): %v", routingInfo, err)
-				}
+			replicas := []string{}
+			for _, addr := range addrs {
+				replicas = append(replicas, fmt.Sprintf("tcp://%s:%d", addr, internalPort))
+			}
+			routingInfo := &protos.RoutingInfo{
+				Component: component,
+				Replicas:  replicas,
+			}
+			if err := b.envelope.UpdateRoutingInfo(routingInfo); err != nil {
+				// TODO(mwhittaker): Log this error.
+				fmt.Fprintf(os.Stderr, "UpdateRoutingInfo(%v): %v", routingInfo, err)
 			}
 		}
 	}
