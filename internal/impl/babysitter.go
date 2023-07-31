@@ -21,6 +21,7 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"sync"
 
 	"github.com/ServiceWeaver/weaver-kube/internal/proto"
 	"github.com/ServiceWeaver/weaver/runtime"
@@ -35,6 +36,11 @@ import (
 	"go.opentelemetry.io/otel/exporters/jaeger"
 	"go.opentelemetry.io/otel/sdk/trace"
 	"golang.org/x/exp/maps"
+	v1 "k8s.io/api/core/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/watch"
+	"k8s.io/client-go/kubernetes"
+	"k8s.io/client-go/rest"
 )
 
 // Endpoint scraped by Prometheus [1] to pull the metrics.
@@ -48,9 +54,13 @@ type babysitter struct {
 	cfg          *ReplicaSetConfig
 	envelope     *envelope.Envelope
 	exportTraces func(spans *protos.TraceSpans) error
+	clientset    *kubernetes.Clientset
 
 	// printer pretty prints log entries.
 	printer *logging.PrettyPrinter
+
+	mu       sync.Mutex
+	watching map[string]struct{} // components being watched
 }
 
 func RunBabysitter(ctx context.Context) error {
@@ -99,13 +109,25 @@ func RunBabysitter(ctx context.Context) error {
 		return traceExporter.ExportSpans(ctx, spansToExport)
 	}
 
+	// Create a Kubernetes config.
+	config, err := rest.InClusterConfig()
+	if err != nil {
+		return err
+	}
+	clientset, err := kubernetes.NewForConfig(config)
+	if err != nil {
+		return err
+	}
+
 	// Create the babysitter.
 	b := &babysitter{
 		ctx:          ctx,
 		cfg:          cfg,
 		envelope:     e,
 		exportTraces: exportTraces,
+		clientset:    clientset,
 		printer:      logging.NewPrettyPrinter(colors.Enabled()),
+		watching:     map[string]struct{}{},
 	}
 
 	// Inform the weavelet of the components it should host.
@@ -142,21 +164,84 @@ func RunBabysitter(ctx context.Context) error {
 
 // ActivateComponent implements the envelope.EnvelopeHandler interface.
 func (b *babysitter) ActivateComponent(_ context.Context, request *protos.ActivateComponentRequest) (*protos.ActivateComponentReply, error) {
-	// Got a request from the weavelet to activate a component. However, the
-	// component should be already activated.
-	rs := replicaSet(request.Component, b.cfg.Deployment)
-
-	// Tell the weavelet the address of the service that runs the component.
-	name := name{b.cfg.Deployment.App.Name, rs, b.cfg.Deployment.Id[:8]}.DNSLabel()
-	addr := fmt.Sprintf("tcp://%s:%d", name, servicePort)
-	routingInfo := &protos.RoutingInfo{
-		Component: request.Component,
-		Replicas:  []string{addr},
-	}
-	if err := b.envelope.UpdateRoutingInfo(routingInfo); err != nil {
-		return nil, err
-	}
+	go func() {
+		if err := b.watchPods(b.ctx, request.Component); err != nil {
+			// TODO(mwhittaker): Log this error.
+			fmt.Fprintf(os.Stderr, "watchPods(%q): %v", request.Component, err)
+		}
+	}()
 	return &protos.ActivateComponentReply{}, nil
+}
+
+// watchPods watches the pods hosting the provided component, updating the
+// routing info whenever the set of pods changes.
+func (b *babysitter) watchPods(ctx context.Context, component string) error {
+	b.mu.Lock()
+	if _, ok := b.watching[component]; ok {
+		// The pods for this component are already being watched.
+		b.mu.Unlock()
+		return nil
+	}
+	b.watching[component] = struct{}{}
+	b.mu.Unlock()
+
+	// Watch the pods running the requested component.
+	rs := replicaSet(component, b.cfg.Deployment)
+	name := name{b.cfg.Deployment.App.Name, rs, b.cfg.Deployment.Id[:8]}.DNSLabel()
+	opts := metav1.ListOptions{LabelSelector: fmt.Sprintf("depName=%s", name)}
+	watcher, err := b.clientset.CoreV1().Pods("default").Watch(ctx, opts)
+	if err != nil {
+		return fmt.Errorf("watch pods for component %s: %w", component, err)
+	}
+
+	// Repeatedly receive events from Kubernetes, updating the set of pod
+	// addresses appropriately. Abort when the channel is closed or the context
+	// is canceled.
+	addrs := map[string]string{}
+	for {
+		select {
+		case <-ctx.Done():
+			watcher.Stop()
+			return ctx.Err()
+
+		case event, ok := <-watcher.ResultChan():
+			if !ok {
+				return nil
+			}
+
+			changed := false
+			switch event.Type {
+			case watch.Added, watch.Modified:
+				pod := event.Object.(*v1.Pod)
+				if pod.Status.PodIP != "" && addrs[pod.Name] != pod.Status.PodIP {
+					addrs[pod.Name] = pod.Status.PodIP
+					changed = true
+				}
+			case watch.Deleted:
+				pod := event.Object.(*v1.Pod)
+				if _, ok := addrs[pod.Name]; ok {
+					delete(addrs, pod.Name)
+					changed = true
+				}
+			}
+			if !changed {
+				continue
+			}
+
+			replicas := []string{}
+			for _, addr := range addrs {
+				replicas = append(replicas, fmt.Sprintf("tcp://%s:%d", addr, internalPort))
+			}
+			routingInfo := &protos.RoutingInfo{
+				Component: component,
+				Replicas:  replicas,
+			}
+			if err := b.envelope.UpdateRoutingInfo(routingInfo); err != nil {
+				// TODO(mwhittaker): Log this error.
+				fmt.Fprintf(os.Stderr, "UpdateRoutingInfo(%v): %v", routingInfo, err)
+			}
+		}
+	}
 }
 
 // GetListenerAddress implements the envelope.EnvelopeHandler interface.
