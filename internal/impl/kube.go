@@ -167,6 +167,7 @@ func (r *replicaSetInfo) deploymentName() string {
 func (r *replicaSetInfo) buildDeployment() (*v1.Deployment, error) {
 	matchLabels := map[string]string{}
 	podLabels := map[string]string{
+		"appName": r.dep.App.Name,
 		"depName": r.deploymentName(),
 		"metrics": r.dep.App.Name, // Needed by Prometheus to scrape the metrics.
 	}
@@ -215,39 +216,6 @@ func (r *replicaSetInfo) buildDeployment() (*v1.Deployment, error) {
 	}, nil
 }
 
-// buildInternalService generates a kubernetes service for a replica set that
-// is used for internal communication between weavelets.
-//
-// TODO(mwhittaker): Double check that this code is unused and delete it.
-func (r *replicaSetInfo) buildInternalService() (*corev1.Service, error) {
-	return &corev1.Service{
-		TypeMeta: metav1.TypeMeta{
-			APIVersion: "v1",
-			Kind:       "Service",
-		},
-		ObjectMeta: metav1.ObjectMeta{Name: r.deploymentName()},
-		Spec: corev1.ServiceSpec{
-			Selector: map[string]string{
-				"depName": r.deploymentName(),
-			},
-			Ports: []corev1.ServicePort{
-				{
-					Name:       "service-port",
-					Port:       servicePort,
-					Protocol:   "TCP",
-					TargetPort: intstr.IntOrString{IntVal: int32(r.internalPort)},
-				},
-				{
-					Name:       "metrics-port",
-					Port:       metricsPort,
-					Protocol:   "TCP",
-					TargetPort: intstr.IntOrString{IntVal: int32(metricsPort)},
-				},
-			},
-		},
-	}, nil
-}
-
 // buildListenerService generates a kubernetes service for a listener.
 //
 // Note that for public listeners, we generate a Load Balancer service because
@@ -270,7 +238,12 @@ func (r *replicaSetInfo) buildListenerService(lis *ReplicaSetConfig_Listener) (*
 			APIVersion: "v1",
 			Kind:       "Service",
 		},
-		ObjectMeta: metav1.ObjectMeta{Name: globalLisName},
+		ObjectMeta: metav1.ObjectMeta{
+			Name: globalLisName,
+			Labels: map[string]string{
+				"lisName": lis.Name,
+			},
+		},
 		Spec: corev1.ServiceSpec{
 			Type: corev1.ServiceType(serviceType),
 			Selector: map[string]string{
@@ -584,20 +557,6 @@ func generateAppDeployment(replicaSets map[string]*replicaSetInfo) ([]byte, erro
 		generated = append(generated, content...)
 		generated = append(generated, []byte("\n---\n")...)
 		fmt.Fprintf(os.Stderr, "Generated kube autoscaler for replica set %v\n", rs.name)
-
-		// Build a service to enable internal communication between the weavelets.
-		s, err := rs.buildInternalService()
-		if err != nil {
-			return nil, fmt.Errorf("unable to create kube service for replica set %s: %w", rs.name, err)
-		}
-		content, err = yaml.Marshal(s)
-		if err != nil {
-			return nil, err
-		}
-		generated = append(generated, []byte(fmt.Sprintf("\n# Service for replica set %s\n", rs.name))...)
-		generated = append(generated, content...)
-		generated = append(generated, []byte("\n---\n")...)
-		fmt.Fprintf(os.Stderr, "Generated kube service for replica set %v\n", rs.name)
 
 		// Build a service for each listener.
 		for _, listeners := range rs.components {

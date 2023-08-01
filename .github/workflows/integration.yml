@@ -12,7 +12,12 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-name: Integration Tests
+name: Integration Test
+
+env:
+    CONFIG_FILE: deploy.toml
+    IMAGE_NAME: $(echo "ghcr.io/${{ github.repository }}/echo" | tr '[:upper:]' '[:lower:]')
+    WAIT_TIMEOUT: "5m"
 
 on:
   push:
@@ -21,71 +26,70 @@ on:
   pull_request:
 
 jobs:
-  collatz:
-    name: Build collatz binary
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v3
-        name: Checkout collatz example
-        with:
-          repository: ServiceWeaver/weaver
-          ref: 'v0.15.0'
-      - uses: actions/setup-go@v4
-        with:
-          go-version: '1.20'
-          cache: true
-      - name: Build collatz example
-        working-directory: ./examples/collatz
-        run: |
-          # Disable CGO to ensure the binary is statically linked
-          CGO_ENABLED=0 \
-          go build -o collatz
-      - uses: actions/upload-artifact@v3
-        with:
-          name: collatz-binary
-          path: ./examples/collatz/collatz
   deploy:
-    name: Deploy and run tests
     runs-on: ubuntu-latest
-    permissions:
-      contents: read
-      packages: write
-    needs: collatz
     steps:
-      - uses: actions/checkout@v3
-      - uses: actions/setup-go@v4
-        with:
-          go-version: '1.20'
-          cache: true
-      - uses: azure/setup-kubectl@v3
-      - uses: medyagh/setup-minikube@master
-      - uses: docker/login-action@v2
-        with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
-      - name: Install weaver-kube
-        run: |
-          go install ./cmd/weaver-kube
-      - uses: actions/download-artifact@v3
-        with:
-          name: collatz-binary
-          path: ./examples/collatz
-      - name: Run integration script
-        working-directory: ./examples/collatz
-        run: ../../dev/integration.sh
-        shell: bash
-        env:
-          IMAGE_NAME: ghcr.io/${{ github.repository }}/example-collatz
-      - name: Display deployment logs
-        if: failure()
-        working-directory: ./examples/collatz
-        run: |
-          kubectl get all && \
-          kubectl describe pod -l app_name=collatz && \
-          kubectl logs -l app_name=collatz
-      - uses: actions/upload-artifact@v3
-        if: always()
-        with:
-          name: collatz-kube-manifests
-          path: ./examples/collatz/kube_*.yaml
+    - name: Check out the repository
+      uses: actions/checkout@v3
+    
+    - name: Set up Go
+      uses: actions/setup-go@v4
+      with:
+        go-version: '1.20'
+        cache: true
+
+    - name: Setup kubectl.
+      uses: azure/setup-kubectl@v3
+
+    - name: Setup minikube
+      uses: medyagh/setup-minikube@master
+    
+    - name: Login into Github Container Registry
+      uses: docker/login-action@v2
+      with:
+        registry: ghcr.io
+        username: ${{ github.actor }}
+        password: ${{ secrets.GITHUB_TOKEN }}
+
+    - name: Install weaver-kube
+      run: cd cmd/weaver-kube; go build .
+
+    - name: Build echo example.
+      run: cd examples/echo; go build .
+    
+    - name: Generate app config file
+      run: |
+        CONFIG=$(cat << EOF
+        [serviceweaver]
+        binary = "./examples/echo/echo"
+
+        [kube]
+        image = "${{ env.IMAGE_NAME }}"
+        listeners.echo = {public = true}
+        EOF
+        )
+        echo "$CONFIG" > ${{ env.CONFIG_FILE }}
+
+    - name: Build the docker image and push
+      run: ./cmd/weaver-kube/weaver-kube deploy --runInDevMode ${{ env.CONFIG_FILE }}
+    
+    - name: Deploy the application
+      run: kubectl apply -f ./kube_*.yaml
+
+    - name: Get the name of the echo listener service
+      run: |
+        NAME=$(timeout ${{ env.WAIT_TIMEOUT }} /bin/sh -c 'while true; do NAME=$(kubectl get service -l lisName=echo -o jsonpath={.items[].metadata.name}) && echo $NAME && break; sleep 2; done')
+        echo "SERVICE_NAME=$NAME" >> $GITHUB_ENV
+
+    - name: Call the echo endpoint until it succeeds
+      run: |
+        timeout ${{ env.WAIT_TIMEOUT }} /bin/sh -c 'while true; do kubectl run -i --rm --restart=Never --image=busybox:latest test-api --command wget -- -q -O - http://${{ env.SERVICE_NAME }}?s=testme && break; sleep 2; done'
+
+    - name: Display deployment logs
+      if: failure()
+      run: |
+        kubectl get all
+        kubectl describe pod
+        kubectl logs -l appName=echo
+  
+  
