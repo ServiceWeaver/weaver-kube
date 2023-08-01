@@ -64,6 +64,11 @@ const (
 	// [1] https://prometheus.io/
 	prometheusImageName = "prom/prometheus:v2.30.3"
 
+	// The name of the Grafana [1] image used to display metrics, traces, and logs.
+	//
+	// [1] https://grafana.com/
+	grafanaImageName = "grafana/grafana"
+
 	// The exported port by the Service Weaver services.
 	servicePort = 80
 
@@ -76,6 +81,9 @@ const (
 
 	// The port on which the weavelets are exporting the metrics.
 	metricsPort = 9090
+
+	// The default Grafana web server port.
+	grafanaPort = 3000
 )
 
 // Port used by the weavelets to listen for internal traffic.
@@ -451,6 +459,13 @@ func GenerateKubeDeployment(image string, dep *protos.Deployment, cfg *KubeConfi
 	}
 	generated = append(generated, content...)
 
+	// Generate the Grafana deployment info.
+	content, err = generateGrafanaDeployment(dep)
+	if err != nil {
+		return fmt.Errorf("unable to create kube deployment for the Grafana service: %w", err)
+	}
+	generated = append(generated, content...)
+
 	// Write the generated kube info into a file.
 	yamlFile := fmt.Sprintf("kube_%s.yaml", dep.Id)
 	f, err := os.OpenFile(yamlFile, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
@@ -607,7 +622,7 @@ func generateAppDeployment(replicaSets map[string]*replicaSetInfo) ([]byte, erro
 }
 
 // generateJaegerDeployment generates the Jaeger kubernetes deployment and service
-// information for a given app deployment.
+// information for a given app.
 //
 // Note that we run a single instance of Jaeger. This is because we are using
 // a Jaeger image that combines three Jaeger components, agent, collector, and
@@ -701,7 +716,7 @@ func generateJaegerDeployment(dep *protos.Deployment) ([]byte, error) {
 }
 
 // generatePrometheusDeployment generates the kubernetes configurations to deploy
-// a Prometheus service for a given app deployment.
+// a Prometheus service for a given app.
 //
 // TODO(rgrandl): check if we can simplify the config map, and the deployment info.
 //
@@ -853,6 +868,171 @@ scrape_configs:
 	generated = append(generated, content...)
 	generated = append(generated, []byte("\n---\n")...)
 	fmt.Fprintf(os.Stderr, "Generated kube service for Prometheus %s\n", pname)
+	return generated, nil
+}
+
+// generateGrafanaDeployment generates the kubernetes configurations to deploy
+// a Grafana service for a given app.
+//
+// TODO(rgrandl): We run a single instance of Grafana for now. We might want
+// to scale it up if it becomes a bottleneck.
+func generateGrafanaDeployment(dep *protos.Deployment) ([]byte, error) {
+	cname := name{dep.App.Name, "grafana", "config"}.DNSLabel()
+	gname := name{dep.App.Name, "grafana"}.DNSLabel()
+	pname := name{dep.App.Name, "prometheus"}.DNSLabel()
+	jname := name{dep.App.Name, jaegerAppName}.DNSLabel()
+
+	// Build the config map that holds the Grafana configuration file. In the
+	// config we specify which data source connections the Grafana service should
+	// export. By default, we export the Prometheus and Jaeger services in order to
+	// have a single dashboard where we can visualize the metrics and the traces of
+	// the app.
+	//
+	// TODO(rgrandl): add a data source connection for Loki, to export logs as well.
+	config := fmt.Sprintf(`
+apiVersion: 1
+datasources:
+  - name: Prometheus
+    type: prometheus
+    access: proxy
+    url: http://%s
+    isDefault: true
+  - name: Jaeger
+    type: jaeger
+    url: http://%s:%d
+`, pname, jname, jaegerUIPort)
+
+	// Create a config map to store the Grafana config.
+	cm := corev1.ConfigMap{
+		TypeMeta: metav1.TypeMeta{
+			Kind:       "ConfigMap",
+			APIVersion: "v1",
+		},
+		ObjectMeta: metav1.ObjectMeta{Name: cname},
+		Data: map[string]string{
+			"grafana.yaml": config,
+		},
+	}
+	content, err := yaml.Marshal(cm)
+	if err != nil {
+		return nil, err
+	}
+	var generated []byte
+	generated = append(generated, []byte(fmt.Sprintf("\n# Config Map %s\n", cname))...)
+	generated = append(generated, content...)
+	generated = append(generated, []byte("\n---\n")...)
+	fmt.Fprintf(os.Stderr, "Generated kube deployment for config map %s\n", cname)
+
+	// Generate the Grafana deployment.
+	d := &appsv1.Deployment{
+		TypeMeta: metav1.TypeMeta{
+			APIVersion: "apps/v1",
+			Kind:       "Deployment",
+		},
+		ObjectMeta: metav1.ObjectMeta{Name: gname},
+		Spec: appsv1.DeploymentSpec{
+			Replicas: ptrOf(int32(1)),
+			Selector: &metav1.LabelSelector{
+				MatchLabels: map[string]string{"grafana": gname},
+			},
+			Template: corev1.PodTemplateSpec{
+				ObjectMeta: metav1.ObjectMeta{
+					Labels: map[string]string{"grafana": gname},
+				},
+				Spec: corev1.PodSpec{
+					Containers: []corev1.Container{
+						{
+							Name:            gname,
+							Image:           fmt.Sprintf("%s:latest", grafanaImageName),
+							ImagePullPolicy: corev1.PullIfNotPresent,
+							Ports:           []corev1.ContainerPort{{ContainerPort: grafanaPort}},
+							VolumeMounts: []corev1.VolumeMount{
+								{
+									// By default, we have to store any data source connection that
+									// should be exported by Grafana under provisioning/datasources.
+									Name:      "datasource-volume",
+									MountPath: "/etc/grafana/provisioning/datasources/",
+								},
+							},
+							Env: []corev1.EnvVar{
+								// TODO(rgrandl): we may want to enable the user to specify their
+								// credentials in a different way.
+								{
+									Name:  "GF_SECURITY_ADMIN_USER",
+									Value: "admin",
+								},
+								{
+									Name:  "GF_SECURITY_ADMIN_PASSWORD",
+									Value: "admin",
+								},
+							},
+						},
+					},
+					Volumes: []corev1.Volume{
+						{
+							Name: "datasource-volume",
+							VolumeSource: corev1.VolumeSource{
+								ConfigMap: &corev1.ConfigMapVolumeSource{
+									LocalObjectReference: corev1.LocalObjectReference{
+										Name: cname,
+									},
+									Items: []corev1.KeyToPath{
+										{
+											Key:  "grafana.yaml",
+											Path: "grafana.yaml",
+										},
+									},
+								},
+							},
+						},
+					},
+				},
+			},
+			Strategy: v1.DeploymentStrategy{
+				Type:          "RollingUpdate",
+				RollingUpdate: &v1.RollingUpdateDeployment{},
+			},
+		},
+	}
+	content, err = yaml.Marshal(d)
+	if err != nil {
+		return nil, err
+	}
+	generated = append(generated, []byte("# Grafana Deployment\n")...)
+	generated = append(generated, content...)
+	generated = append(generated, []byte("\n---\n")...)
+	fmt.Fprintf(os.Stderr, "Generated Grafana deployment\n")
+
+	// Generate the Grafana service.
+	//
+	// TODO(rgrandl): should we create a load balancer instead of a cluster ip?
+	s := &corev1.Service{
+		TypeMeta: metav1.TypeMeta{
+			APIVersion: "v1",
+			Kind:       "Service",
+		},
+		ObjectMeta: metav1.ObjectMeta{Name: gname},
+		Spec: corev1.ServiceSpec{
+			Selector: map[string]string{"grafana": gname},
+			Ports: []corev1.ServicePort{
+				{
+					Name:       "ui-port",
+					Port:       servicePort,
+					Protocol:   "TCP",
+					TargetPort: intstr.IntOrString{IntVal: int32(grafanaPort)},
+				},
+			},
+		},
+	}
+	content, err = yaml.Marshal(s)
+	if err != nil {
+		return nil, err
+	}
+	generated = append(generated, []byte("\n# Grafana Service\n")...)
+	generated = append(generated, content...)
+	generated = append(generated, []byte("\n---\n")...)
+	fmt.Fprintf(os.Stderr, "Generated Grafana service\n")
+
 	return generated, nil
 }
 
