@@ -1261,7 +1261,19 @@ datasources:
     url: http://%s:%d
 `, pname, jname, jaegerUIPort, lname, lokiPort)
 
-	// Create a config map to store the Grafana config.
+	// It contains the list of dashboard providers that load dashboards into
+	// Grafana from the local filesystem [1].
+	//
+	// https://grafana.com/docs/grafana/latest/administration/provisioning/#dashboards
+	dashboard := fmt.Sprintf(`
+apiVersion: 1
+providers:
+ - name: 'Service Weaver Dashboard'
+   options:
+     path: /etc/grafana/dashboards/default-dashboard.json
+`)
+
+	// Create a config map to store the Grafana configs and the default dashboards.
 	cm := corev1.ConfigMap{
 		TypeMeta: metav1.TypeMeta{
 			Kind:       "ConfigMap",
@@ -1269,7 +1281,9 @@ datasources:
 		},
 		ObjectMeta: metav1.ObjectMeta{Name: cname},
 		Data: map[string]string{
-			"grafana.yaml": config,
+			"grafana.yaml":           config,
+			"dashboard-config.yaml":  dashboard,
+			"default-dashboard.json": grafanaDashboard(dep.App.Name),
 		},
 	}
 	content, err := yaml.Marshal(cm)
@@ -1312,6 +1326,21 @@ datasources:
 									Name:      "datasource-volume",
 									MountPath: "/etc/grafana/provisioning/datasources/",
 								},
+								{
+									// By default, we need to store the dashboards config files under
+									// provisioning/dashboards directory. Each config file can contain
+									// a list of dashboards providers that load dashboards into Grafana
+									// from the local filesystem. More info here [1].
+									//
+									// [1] https://grafana.com/docs/grafana/latest/administration/provisioning/#dashboards
+									Name:      "dashboards-config",
+									MountPath: "/etc/grafana/provisioning/dashboards/",
+								},
+								{
+									// Mount the volume that stores the predefined dashboards.
+									Name:      "dashboards",
+									MountPath: "/etc/grafana/dashboards/",
+								},
 							},
 							Env: []corev1.EnvVar{
 								// TODO(rgrandl): we may want to enable the user to specify their
@@ -1339,6 +1368,38 @@ datasources:
 										{
 											Key:  "grafana.yaml",
 											Path: "grafana.yaml",
+										},
+									},
+								},
+							},
+						},
+						{
+							Name: "dashboards-config",
+							VolumeSource: corev1.VolumeSource{
+								ConfigMap: &corev1.ConfigMapVolumeSource{
+									LocalObjectReference: corev1.LocalObjectReference{
+										Name: cname,
+									},
+									Items: []corev1.KeyToPath{
+										{
+											Key:  "dashboard-config.yaml",
+											Path: "dashboard-config.yaml",
+										},
+									},
+								},
+							},
+						},
+						{
+							Name: "dashboards",
+							VolumeSource: corev1.VolumeSource{
+								ConfigMap: &corev1.ConfigMapVolumeSource{
+									LocalObjectReference: corev1.LocalObjectReference{
+										Name: cname,
+									},
+									Items: []corev1.KeyToPath{
+										{
+											Key:  "default-dashboard.json",
+											Path: "default-dashboard.json",
 										},
 									},
 								},
