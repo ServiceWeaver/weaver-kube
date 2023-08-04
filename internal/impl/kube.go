@@ -1086,26 +1086,27 @@ scrape_configs:
         target_label: __path__
 `, lname, lokiPort, dep.App.Name)
 
-	// Config is stored as a secret in the daemonset.
-	secret := corev1.Secret{
+	// Config is stored as a config map in the daemonset.
+	cm := corev1.ConfigMap{
 		TypeMeta: metav1.TypeMeta{
-			Kind:       "Secret",
+			Kind:       "ConfigMap",
 			APIVersion: "v1",
 		},
 		ObjectMeta: metav1.ObjectMeta{Name: promName},
-		StringData: map[string]string{
+		Data: map[string]string{
 			"promtail.yaml": config,
 		},
 	}
-	content, err := yaml.Marshal(secret)
+
+	content, err := yaml.Marshal(cm)
 	if err != nil {
 		return nil, err
 	}
 	var generated []byte
-	generated = append(generated, []byte(fmt.Sprintf("\n# Secret Info %s\n", secret.Name))...)
+	generated = append(generated, []byte(fmt.Sprintf("\n# Config Map %s\n", cm.Name))...)
 	generated = append(generated, content...)
 	generated = append(generated, []byte("\n---\n")...)
-	fmt.Fprintf(os.Stderr, "Generated kube deployment for secret info %s\n", secret.Name)
+	fmt.Fprintf(os.Stderr, "Generated kube deployment for config map %s\n", cm.Name)
 
 	// Create a daemonset that will run on each node. The daemonset will run promtail
 	// in order to scrape the pods running on each node.
@@ -1176,8 +1177,16 @@ scrape_configs:
 						{
 							Name: "config",
 							VolumeSource: corev1.VolumeSource{
-								Secret: &corev1.SecretVolumeSource{
-									SecretName: secret.Name,
+								ConfigMap: &corev1.ConfigMapVolumeSource{
+									LocalObjectReference: corev1.LocalObjectReference{
+										Name: cm.Name,
+									},
+									Items: []corev1.KeyToPath{
+										{
+											Key:  "promtail.yaml",
+											Path: "promtail.yaml",
+										},
+									},
 								},
 							},
 						},
@@ -1265,13 +1274,13 @@ datasources:
 	// Grafana from the local filesystem [1].
 	//
 	// https://grafana.com/docs/grafana/latest/administration/provisioning/#dashboards
-	dashboard := fmt.Sprintf(`
+	dashboard := `
 apiVersion: 1
 providers:
  - name: 'Service Weaver Dashboard'
    options:
      path: /etc/grafana/dashboards/default-dashboard.json
-`)
+`
 
 	// Create a config map to store the Grafana configs and the default dashboards.
 	cm := corev1.ConfigMap{
