@@ -723,6 +723,9 @@ scrape_configs:
     metrics_path: %s
     kubernetes_sd_configs:
       - role: pod
+        namespaces:
+          names:
+            - default
     scheme: http
     relabel_configs:
       - source_labels: [__meta_kubernetes_pod_label_metrics]
