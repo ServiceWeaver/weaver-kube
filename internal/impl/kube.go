@@ -118,6 +118,9 @@ var (
 	memoryUnit = resource.MustParse("128Mi")
 )
 
+// dashboard was generated using the Grafana UI. Then, we saved the content as
+// a JSON file.
+//
 //go:embed dashboard.txt
 var dashboardContent string
 
