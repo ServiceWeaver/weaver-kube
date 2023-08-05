@@ -16,6 +16,7 @@ package impl
 
 import (
 	"bytes"
+	_ "embed"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -98,12 +99,12 @@ const (
 
 	// The default Grafana web server port.
 	grafanaPort = 3000
-)
 
-// Port used by the weavelets to listen for internal traffic.
-//
-// TODO(mwhittaker): Remove internal port from kube.proto.
-const internalPort = 10000
+	// Port used by the weavelets to listen for internal traffic.
+	//
+	// TODO(mwhittaker): Remove internal port from kube.proto.
+	internalPort = 10000
+)
 
 var (
 	// Start value for ports used by the public and private listeners.
@@ -116,6 +117,9 @@ var (
 	cpuUnit    = resource.MustParse("100m")
 	memoryUnit = resource.MustParse("128Mi")
 )
+
+//go:embed dashboard.txt
+var dashboardContent string
 
 // replicaSetInfo contains information associated with a replica set.
 type replicaSetInfo struct {
@@ -1041,7 +1045,7 @@ func generatePromtailDeployment(dep *protos.Deployment) ([]byte, error) {
 
 	// This configuration is a simplified version of the Promtail config generated
 	// by helm [1]. Right now we scrape only logs from the pods. We may want to
-	// scrape containers and nodes info as well.
+	// scrape system information and nodes info as well.
 	//
 	// The scraped logs are sent to Loki for indexing and being stored.
 	//
@@ -1274,7 +1278,7 @@ datasources:
 	// Grafana from the local filesystem [1].
 	//
 	// https://grafana.com/docs/grafana/latest/administration/provisioning/#dashboards
-	dashboard := `
+	const dashboard = `
 apiVersion: 1
 providers:
  - name: 'Service Weaver Dashboard'
@@ -1292,7 +1296,7 @@ providers:
 		Data: map[string]string{
 			"grafana.yaml":           config,
 			"dashboard-config.yaml":  dashboard,
-			"default-dashboard.json": grafanaDashboard(dep.App.Name),
+			"default-dashboard.json": fmt.Sprintf(dashboardContent, dep.App.Name),
 		},
 	}
 	content, err := yaml.Marshal(cm)
