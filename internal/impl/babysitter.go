@@ -25,7 +25,6 @@ import (
 
 	"github.com/ServiceWeaver/weaver-kube/internal/proto"
 	"github.com/ServiceWeaver/weaver/runtime"
-	"github.com/ServiceWeaver/weaver/runtime/colors"
 	"github.com/ServiceWeaver/weaver/runtime/envelope"
 	"github.com/ServiceWeaver/weaver/runtime/logging"
 	"github.com/ServiceWeaver/weaver/runtime/metrics"
@@ -126,7 +125,7 @@ func RunBabysitter(ctx context.Context) error {
 		envelope:     e,
 		exportTraces: exportTraces,
 		clientset:    clientset,
-		printer:      logging.NewPrettyPrinter(colors.Enabled()),
+		printer:      logging.NewPrettyPrinter(false /*colors disabled*/),
 		watching:     map[string]struct{}{},
 	}
 
