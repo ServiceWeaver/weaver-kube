@@ -126,9 +126,10 @@ var dashboardContent string
 
 // replicaSetInfo contains information associated with a replica set.
 type replicaSetInfo struct {
-	name  string             // name of the replica set
-	image string             // name of the image to be deployed
-	dep   *protos.Deployment // deployment info
+	name      string             // name of the replica set
+	image     string             // name of the image to be deployed
+	namespace string             // namespace where the replica set will be deployed
+	dep       *protos.Deployment // deployment info
 
 	// set of the components hosted by the replica set and their listeners,
 	// keyed by component name.
@@ -164,6 +165,10 @@ type KubeConfig struct {
 	// Note that "weaver kube deploy" will automatically append a unique tag to
 	// Image, so Image should not already contain a tag.
 	Image string
+
+	// Namespace is the name of the namespace where the application should be deployed.
+	// If not specified, the application will be deployed in the default namespace.
+	Namespace string
 
 	// Options for the application listeners, keyed by listener name.
 	// If a listener isn't specified in the map, default options will be used.
@@ -213,14 +218,18 @@ func (r *replicaSetInfo) buildDeployment() (*v1.Deployment, error) {
 			APIVersion: "apps/v1",
 			Kind:       "Deployment",
 		},
-		ObjectMeta: metav1.ObjectMeta{Name: name},
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      name,
+			Namespace: r.namespace,
+		},
 		Spec: appsv1.DeploymentSpec{
 			Selector: &metav1.LabelSelector{
 				MatchLabels: matchLabels,
 			},
 			Template: corev1.PodTemplateSpec{
 				ObjectMeta: metav1.ObjectMeta{
-					Labels: podLabels,
+					Labels:    podLabels,
+					Namespace: r.namespace,
 				},
 				Spec: corev1.PodSpec{
 					Containers: []corev1.Container{container},
@@ -260,7 +269,8 @@ func (r *replicaSetInfo) buildListenerService(lis *ReplicaSetConfig_Listener) (*
 			Kind:       "Service",
 		},
 		ObjectMeta: metav1.ObjectMeta{
-			Name: globalLisName,
+			Name:      globalLisName,
+			Namespace: r.namespace,
 			Labels: map[string]string{
 				"lisName": lis.Name,
 			},
@@ -297,7 +307,10 @@ func (r *replicaSetInfo) buildAutoscaler() (*v2.HorizontalPodAutoscaler, error) 
 			APIVersion: "autoscaling/v2",
 			Kind:       "HorizontalPodAutoscaler",
 		},
-		ObjectMeta: metav1.ObjectMeta{Name: aname},
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      aname,
+			Namespace: r.namespace,
+		},
 		Spec: v2.HorizontalPodAutoscalerSpec{
 			ScaleTargetRef: v2.CrossVersionObjectReference{
 				APIVersion: "apps/v1",
@@ -330,6 +343,7 @@ func (r *replicaSetInfo) buildContainer() (corev1.Container, error) {
 	// docker image.
 	r.dep.App.Binary = fmt.Sprintf("/weaver/%s", filepath.Base(r.dep.App.Binary))
 	kubeCfgStr, err := proto.ToEnv(&ReplicaSetConfig{
+		Namespace:         r.namespace,
 		Deployment:        r.dep,
 		ReplicaSet:        r.name,
 		ComponentsToStart: r.components,
@@ -420,7 +434,7 @@ func GenerateKubeDeployment(image string, dep *protos.Deployment, cfg *KubeConfi
 
 	// Generate roles and role bindings.
 	var generated []byte
-	content, err := generateRolesAndBindings()
+	content, err := generateRolesAndBindings(cfg.Namespace)
 	if err != nil {
 		return fmt.Errorf("unable to generate roles and bindings: %w", err)
 	}
@@ -439,36 +453,38 @@ func GenerateKubeDeployment(image string, dep *protos.Deployment, cfg *KubeConfi
 	}
 	generated = append(generated, content...)
 
+	// Generate deployment info needed to get insights into the application.
+
 	// Generate the Jaeger deployment info.
-	content, err = generateJaegerDeployment(dep)
+	content, err = generateJaegerDeployment(dep, cfg.Namespace)
 	if err != nil {
 		return fmt.Errorf("unable to create kube jaeger deployment: %w", err)
 	}
 	generated = append(generated, content...)
 
 	// Generate the Prometheus deployment info.
-	content, err = generatePrometheusDeployment(dep)
+	content, err = generatePrometheusDeployment(dep, cfg.Namespace)
 	if err != nil {
 		return fmt.Errorf("unable to create kube deployment for the Prometheus service: %w", err)
 	}
 	generated = append(generated, content...)
 
 	// Generate the Loki deployment info.
-	content, err = generateLokiDeployment(dep)
+	content, err = generateLokiDeployment(dep, cfg.Namespace)
 	if err != nil {
 		return fmt.Errorf("unable to create kube deployment for the Loki service: %w", err)
 	}
 	generated = append(generated, content...)
 
 	// Generate the Promtail deployment info.
-	content, err = generatePromtailDeployment(dep)
+	content, err = generatePromtailDeployment(dep, cfg.Namespace)
 	if err != nil {
 		return fmt.Errorf("unable to create kube deployment for Promtail: %w", err)
 	}
 	generated = append(generated, content...)
 
 	// Generate the Grafana deployment info.
-	content, err = generateGrafanaDeployment(dep)
+	content, err = generateGrafanaDeployment(dep, cfg.Namespace)
 	if err != nil {
 		return fmt.Errorf("unable to create kube deployment for the Grafana service: %w", err)
 	}
@@ -489,22 +505,24 @@ func GenerateKubeDeployment(image string, dep *protos.Deployment, cfg *KubeConfi
 	return nil
 }
 
-// generateRolesAndBindings generates Kubernetes roles and role bindings that
-// grant permissions to the appropriate service accounts.
-func generateRolesAndBindings() ([]byte, error) {
+// generateRolesAndBindings generates Kubernetes roles and role bindings in
+// namespace that grant permissions to the appropriate service accounts.
+func generateRolesAndBindings(namespace string) ([]byte, error) {
 	// Grant the default service account the permission to get, list, and watch
 	// pods. The babysitter watches pods to generate routing info.
 	//
 	// TODO(mwhittaker): This leaks permissions to the user's code. We should
 	// avoid that. We might have to run the babysitter and weavelet in separate
 	// containers or pods.
+
 	role := rbacv1.Role{
 		TypeMeta: metav1.TypeMeta{
 			APIVersion: "rbac.authorization.k8s.io/v1",
 			Kind:       "Role",
 		},
 		ObjectMeta: metav1.ObjectMeta{
-			Name: "pods-getter",
+			Name:      "pods-getter",
+			Namespace: namespace,
 		},
 		Rules: []rbacv1.PolicyRule{
 			{
@@ -521,7 +539,8 @@ func generateRolesAndBindings() ([]byte, error) {
 			Kind:       "RoleBinding",
 		},
 		ObjectMeta: metav1.ObjectMeta{
-			Name: "default-pods-getter",
+			Name:      "default-pods-getter",
+			Namespace: namespace,
 		},
 		RoleRef: rbacv1.RoleRef{
 			APIGroup: "rbac.authorization.k8s.io",
@@ -530,8 +549,9 @@ func generateRolesAndBindings() ([]byte, error) {
 		},
 		Subjects: []rbacv1.Subject{
 			{
-				Kind: "ServiceAccount",
-				Name: "default",
+				Kind:      "ServiceAccount",
+				Name:      "default",
+				Namespace: namespace,
 			},
 		},
 	}
@@ -616,14 +636,14 @@ func generateAppDeployment(replicaSets map[string]*replicaSetInfo) ([]byte, erro
 }
 
 // generateJaegerDeployment generates the Jaeger kubernetes deployment and service
-// information for a given app.
+// information for a given app in namespace.
 //
 // Note that we run a single instance of Jaeger. This is because we are using
 // a Jaeger image that combines three Jaeger components, agent, collector, and
 // query service/UI in a single image.
 // TODO(rgrandl): If the trace volume can't be handled by a single instance, we
 // should scale these components independently, and use different image(s).
-func generateJaegerDeployment(dep *protos.Deployment) ([]byte, error) {
+func generateJaegerDeployment(dep *protos.Deployment, namespace string) ([]byte, error) {
 	jname := name{dep.App.Name, jaegerAppName}.DNSLabel()
 
 	// Generate the Jaeger deployment.
@@ -632,7 +652,10 @@ func generateJaegerDeployment(dep *protos.Deployment) ([]byte, error) {
 			APIVersion: "apps/v1",
 			Kind:       "Deployment",
 		},
-		ObjectMeta: metav1.ObjectMeta{Name: jname},
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      jname,
+			Namespace: namespace,
+		},
 		Spec: appsv1.DeploymentSpec{
 			Replicas: ptrOf(int32(1)),
 			Selector: &metav1.LabelSelector{
@@ -645,6 +668,7 @@ func generateJaegerDeployment(dep *protos.Deployment) ([]byte, error) {
 					Labels: map[string]string{
 						"jaeger": jname,
 					},
+					Namespace: namespace,
 				},
 				Spec: corev1.PodSpec{
 					Containers: []corev1.Container{
@@ -678,7 +702,10 @@ func generateJaegerDeployment(dep *protos.Deployment) ([]byte, error) {
 			APIVersion: "v1",
 			Kind:       "Service",
 		},
-		ObjectMeta: metav1.ObjectMeta{Name: jname},
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      jname,
+			Namespace: namespace,
+		},
 		Spec: corev1.ServiceSpec{
 			Selector: map[string]string{"jaeger": jname},
 			Ports: []corev1.ServicePort{
@@ -710,13 +737,13 @@ func generateJaegerDeployment(dep *protos.Deployment) ([]byte, error) {
 }
 
 // generatePrometheusDeployment generates the kubernetes configurations to deploy
-// a Prometheus service for a given app.
+// a Prometheus service for a given app in namespace.
 //
 // TODO(rgrandl): check if we can simplify the config map, and the deployment info.
 //
 // TODO(rgrandl): We run a single instance of Prometheus for now. We might want
 // to scale it up if it becomes a bottleneck.
-func generatePrometheusDeployment(dep *protos.Deployment) ([]byte, error) {
+func generatePrometheusDeployment(dep *protos.Deployment, namespace string) ([]byte, error) {
 	cname := name{dep.App.Name, "prometheus", "config"}.DNSLabel()
 	pname := name{dep.App.Name, "prometheus"}.DNSLabel()
 
@@ -732,13 +759,13 @@ scrape_configs:
       - role: pod
         namespaces:
           names:
-            - default
+            - %s
     scheme: http
     relabel_configs:
       - source_labels: [__meta_kubernetes_pod_label_metrics]
         regex: "%s"
         action: keep
-`, pname, prometheusEndpoint, dep.App.Name)
+`, pname, prometheusEndpoint, namespace, dep.App.Name)
 
 	// Create a config map to store the prometheus config.
 	cm := corev1.ConfigMap{
@@ -746,7 +773,10 @@ scrape_configs:
 			Kind:       "ConfigMap",
 			APIVersion: "v1",
 		},
-		ObjectMeta: metav1.ObjectMeta{Name: cname},
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      cname,
+			Namespace: namespace,
+		},
 		Data: map[string]string{
 			"prometheus.yaml": config,
 		},
@@ -767,7 +797,10 @@ scrape_configs:
 			APIVersion: "apps/v1",
 			Kind:       "Deployment",
 		},
-		ObjectMeta: metav1.ObjectMeta{Name: pname},
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      pname,
+			Namespace: namespace,
+		},
 		Spec: appsv1.DeploymentSpec{
 			Replicas: ptrOf(int32(1)),
 			Selector: &metav1.LabelSelector{
@@ -775,7 +808,8 @@ scrape_configs:
 			},
 			Template: corev1.PodTemplateSpec{
 				ObjectMeta: metav1.ObjectMeta{
-					Labels: map[string]string{"prometheus": pname},
+					Labels:    map[string]string{"prometheus": pname},
+					Namespace: namespace,
 				},
 				Spec: corev1.PodSpec{
 					Containers: []corev1.Container{
@@ -845,7 +879,10 @@ scrape_configs:
 			APIVersion: "v1",
 			Kind:       "Service",
 		},
-		ObjectMeta: metav1.ObjectMeta{Name: pname},
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      pname,
+			Namespace: namespace,
+		},
 		Spec: corev1.ServiceSpec{
 			Selector: map[string]string{"prometheus": pname},
 			Ports: []corev1.ServicePort{
@@ -869,13 +906,13 @@ scrape_configs:
 }
 
 // generateLokiDeployment generates the kubernetes configurations to deploy
-// a Loki service for a given app.
+// a Loki service for a given app in namespace.
 //
 // TODO(rgrandl): check if we can simplify the config map, and the deployment info.
 //
 // TODO(rgrandl): We run a single instance of Loki for now. We might want
 // to scale it up if it becomes a bottleneck.
-func generateLokiDeployment(dep *protos.Deployment) ([]byte, error) {
+func generateLokiDeployment(dep *protos.Deployment, namespace string) ([]byte, error) {
 	cname := name{dep.App.Name, "loki", "config"}.DNSLabel()
 	lname := name{dep.App.Name, "loki"}.DNSLabel()
 
@@ -927,7 +964,10 @@ schema_config:
 			Kind:       "ConfigMap",
 			APIVersion: "v1",
 		},
-		ObjectMeta: metav1.ObjectMeta{Name: cname},
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      cname,
+			Namespace: namespace,
+		},
 		Data: map[string]string{
 			"loki.yaml": config,
 		},
@@ -948,7 +988,10 @@ schema_config:
 			APIVersion: "apps/v1",
 			Kind:       "Deployment",
 		},
-		ObjectMeta: metav1.ObjectMeta{Name: lname},
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      lname,
+			Namespace: namespace,
+		},
 		Spec: appsv1.DeploymentSpec{
 			Replicas: ptrOf(int32(1)),
 			Selector: &metav1.LabelSelector{
@@ -956,7 +999,8 @@ schema_config:
 			},
 			Template: corev1.PodTemplateSpec{
 				ObjectMeta: metav1.ObjectMeta{
-					Labels: map[string]string{"loki": lname},
+					Labels:    map[string]string{"loki": lname},
+					Namespace: namespace,
 				},
 				Spec: corev1.PodSpec{
 					Containers: []corev1.Container{
@@ -1017,7 +1061,10 @@ schema_config:
 			APIVersion: "v1",
 			Kind:       "Service",
 		},
-		ObjectMeta: metav1.ObjectMeta{Name: lname},
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      lname,
+			Namespace: namespace,
+		},
 		Spec: corev1.ServiceSpec{
 			Selector: map[string]string{"loki": lname},
 			Ports: []corev1.ServicePort{
@@ -1042,7 +1089,7 @@ schema_config:
 
 // generatePromtailDeployment generates information that is needed to run a
 // Promtail agent on each node in order to scrape the logs.
-func generatePromtailDeployment(dep *protos.Deployment) ([]byte, error) {
+func generatePromtailDeployment(dep *protos.Deployment, namespace string) ([]byte, error) {
 	promName := name{dep.App.Name, "promtail"}.DNSLabel()
 	lname := name{dep.App.Name, "loki"}.DNSLabel()
 
@@ -1070,7 +1117,7 @@ scrape_configs:
       - role: pod
         namespaces:
           names:
-            - default
+            - %s
     relabel_configs:
       - source_labels:
           - __meta_kubernetes_pod_label_appName
@@ -1091,7 +1138,7 @@ scrape_configs:
         - __meta_kubernetes_pod_uid
         - __meta_kubernetes_pod_container_name
         target_label: __path__
-`, lname, lokiPort, dep.App.Name)
+`, lname, lokiPort, namespace, dep.App.Name)
 
 	// Config is stored as a config map in the daemonset.
 	cm := corev1.ConfigMap{
@@ -1099,7 +1146,10 @@ scrape_configs:
 			Kind:       "ConfigMap",
 			APIVersion: "v1",
 		},
-		ObjectMeta: metav1.ObjectMeta{Name: promName},
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      promName,
+			Namespace: namespace,
+		},
 		Data: map[string]string{
 			"promtail.yaml": config,
 		},
@@ -1123,7 +1173,8 @@ scrape_configs:
 			APIVersion: "apps/v1",
 		},
 		ObjectMeta: metav1.ObjectMeta{
-			Name: promName,
+			Name:      promName,
+			Namespace: namespace,
 		},
 		Spec: appsv1.DaemonSetSpec{
 			Selector: &metav1.LabelSelector{
@@ -1136,6 +1187,7 @@ scrape_configs:
 					Labels: map[string]string{
 						"promtail": promName,
 					},
+					Namespace: namespace,
 				},
 				Spec: corev1.PodSpec{
 					ServiceAccountName: "default",
@@ -1242,11 +1294,11 @@ scrape_configs:
 }
 
 // generateGrafanaDeployment generates the kubernetes configurations to deploy
-// a Grafana service for a given app.
+// a Grafana service for a given app in namespace.
 //
 // TODO(rgrandl): We run a single instance of Grafana for now. We might want
 // to scale it up if it becomes a bottleneck.
-func generateGrafanaDeployment(dep *protos.Deployment) ([]byte, error) {
+func generateGrafanaDeployment(dep *protos.Deployment, namespace string) ([]byte, error) {
 	cname := name{dep.App.Name, "grafana", "config"}.DNSLabel()
 	gname := name{dep.App.Name, "grafana"}.DNSLabel()
 	pname := name{dep.App.Name, "prometheus"}.DNSLabel()
@@ -1295,7 +1347,10 @@ providers:
 			Kind:       "ConfigMap",
 			APIVersion: "v1",
 		},
-		ObjectMeta: metav1.ObjectMeta{Name: cname},
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      cname,
+			Namespace: namespace,
+		},
 		Data: map[string]string{
 			"grafana.yaml":           config,
 			"dashboard-config.yaml":  dashboard,
@@ -1318,7 +1373,10 @@ providers:
 			APIVersion: "apps/v1",
 			Kind:       "Deployment",
 		},
-		ObjectMeta: metav1.ObjectMeta{Name: gname},
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      gname,
+			Namespace: namespace,
+		},
 		Spec: appsv1.DeploymentSpec{
 			Replicas: ptrOf(int32(1)),
 			Selector: &metav1.LabelSelector{
@@ -1326,7 +1384,8 @@ providers:
 			},
 			Template: corev1.PodTemplateSpec{
 				ObjectMeta: metav1.ObjectMeta{
-					Labels: map[string]string{"grafana": gname},
+					Labels:    map[string]string{"grafana": gname},
+					Namespace: namespace,
 				},
 				Spec: corev1.PodSpec{
 					Containers: []corev1.Container{
@@ -1447,7 +1506,10 @@ providers:
 			APIVersion: "v1",
 			Kind:       "Service",
 		},
-		ObjectMeta: metav1.ObjectMeta{Name: gname},
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      gname,
+			Namespace: namespace,
+		},
 		Spec: corev1.ServiceSpec{
 			Selector: map[string]string{"grafana": gname},
 			Ports: []corev1.ServicePort{
@@ -1491,6 +1553,7 @@ func buildReplicaSetSpecs(dep *protos.Deployment, image string, cfg *KubeConfig)
 			rsets[rsName] = &replicaSetInfo{
 				name:         rsName,
 				image:        image,
+				namespace:    cfg.Namespace,
 				dep:          dep,
 				components:   map[string]*ReplicaSetConfig_Listeners{},
 				internalPort: internalPort,

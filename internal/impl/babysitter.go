@@ -188,7 +188,7 @@ func (b *babysitter) watchPods(ctx context.Context, component string) error {
 	rs := replicaSet(component, b.cfg.Deployment)
 	name := name{b.cfg.Deployment.App.Name, rs, b.cfg.Deployment.Id[:8]}.DNSLabel()
 	opts := metav1.ListOptions{LabelSelector: fmt.Sprintf("depName=%s", name)}
-	watcher, err := b.clientset.CoreV1().Pods("default").Watch(ctx, opts)
+	watcher, err := b.clientset.CoreV1().Pods(b.cfg.Namespace).Watch(ctx, opts)
 	if err != nil {
 		return fmt.Errorf("watch pods for component %s: %w", component, err)
 	}

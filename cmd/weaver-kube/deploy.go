@@ -112,6 +112,9 @@ func deploy(ctx context.Context, args []string) error {
 	if config.Image == "" {
 		return fmt.Errorf("No image name provided in config file. See `weaver kube deploy --help` for details")
 	}
+	if config.Namespace == "" {
+		config.Namespace = "default"
+	}
 	binListeners, err := bin.ReadListeners(app.Binary)
 	if err != nil {
 		return fmt.Errorf("cannot read listeners from binary %s: %w", app.Binary, err)
