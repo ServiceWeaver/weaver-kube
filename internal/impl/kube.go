@@ -166,8 +166,9 @@ type KubeConfig struct {
 	// Image, so Image should not already contain a tag.
 	Image string
 
-	// Namespace is the name of the namespace where the application should be deployed.
-	// If not specified, the application will be deployed in the default namespace.
+	// Namespace is the name of the Kubernetes namespace where the application
+	// should be deployed. If not specified, the application will be deployed in
+	// the default namespace.
 	Namespace string
 
 	// Options for the application listeners, keyed by listener name.
