@@ -20,7 +20,6 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"time"
 
 	"github.com/ServiceWeaver/weaver-kube/internal/proto"
 	"github.com/ServiceWeaver/weaver/runtime/bin"
@@ -46,59 +45,8 @@ const (
 	// information for a babysitter deployed using kube.
 	kubeConfigEnvKey = "SERVICEWEAVER_DEPLOYMENT_CONFIG"
 
-	// The name of the Jaeger application.
-	jaegerAppName = "jaeger"
-
-	// The name of the jaeger image used to handle the traces.
-	//
-	// all-in-one[1] combines the three Jaeger components: agent, collector, and
-	// query service/UI in a single binary, which is enough for handling the traces
-	// in a kubernetes deployment. However, we don't really need an agent. Also,
-	// we may want to launch separate collector and query services later on. Or,
-	// we may want to launch an otel collector service as well, to ensure that the
-	// traces are available, even if the deployment is deleted.
-	//
-	// [1] https://www.jaegertracing.io/docs/1.45/deployment/#all-in-one
-	jaegerImageName = "jaegertracing/all-in-one"
-
-	// The name of the Prometheus [1] image used to handle the metrics.
-	//
-	// [1] https://prometheus.io/
-	prometheusImageName = "prom/prometheus:v2.30.3"
-
-	// The name of the Loki [1] image used to handle the logs.
-	//
-	// [1] https://grafana.com/oss/loki/
-	lokiImageName = "grafana/loki"
-
-	// The name of the Promtail [1] image used to scrape the logs.
-	//
-	// [1] https://grafana.com/docs/loki/latest/clients/promtail/
-	promtailImageName = "grafana/promtail"
-
-	// The name of the Grafana [1] image used to display metrics, traces, and logs.
-	//
-	// [1] https://grafana.com/
-	grafanaImageName = "grafana/grafana"
-
 	// The exported port by the Service Weaver services.
 	servicePort = 80
-
-	// The port on which the Jaeger UI is listening on.
-	jaegerUIPort = 16686
-
-	// The port on which the Jaeger collector is receiving traces from the
-	// clients when using the Jaeger exporter.
-	jaegerCollectorPort = 14268
-
-	// The port on which the weavelets are exporting the metrics.
-	metricsPort = 9090
-
-	// The port on which Loki is exporting the logs.
-	lokiPort = 3100
-
-	// The default Grafana web server port.
-	grafanaPort = 3000
 
 	// Port used by the weavelets to listen for internal traffic.
 	//
@@ -118,12 +66,6 @@ var (
 	memoryUnit = resource.MustParse("128Mi")
 )
 
-// dashboard was generated using the Grafana UI. Then, we saved the content as
-// a JSON file.
-//
-//go:embed dashboard.txt
-var dashboardContent string
-
 // replicaSetInfo contains information associated with a replica set.
 type replicaSetInfo struct {
 	name      string             // name of the replica set
@@ -138,6 +80,8 @@ type replicaSetInfo struct {
 	// port used by the weavelets that are part of the replica set to listen on
 	// for internal traffic.
 	internalPort int
+
+	traceServiceURL string // trace exporter URL
 }
 
 // ListenerOptions stores configuration options for a listener.
@@ -174,6 +118,41 @@ type KubeConfig struct {
 	// Options for the application listeners, keyed by listener name.
 	// If a listener isn't specified in the map, default options will be used.
 	Listeners map[string]*ListenerOptions
+
+	// Observability controls how the deployer will export observability information
+	// such as logs, metrics and traces, keyed by service. If no options are
+	// specified, the deployer will launch corresponding services for exporting logs,
+	// metrics and traces automatically.
+	//
+	// We support the following observability services:
+	// prometheus_service - to export metrics to Prometheus [1]
+	// jaeger_service     - to export traces to Jaeger [2]
+	// loki_service       - to export logs to Grafana Loki [3]
+	// grafana_service    - to visualize/manipulate observability information [4]
+	//
+	// Possible values for each service:
+	// 1) do not specify a value at all; leave it empty
+	// this is the default value; kube deployer will automatically create the
+	// observability service for you.
+	//
+	// 2) "none"
+	// kube deployer will not export the corresponding observability information to
+	// any service. E.g., prometheus_service = "none", it means that the user will
+	// not be able to see any metrics at all. This can be useful for testing or
+	// benchmarking the performance of your application.
+	//
+	// 3) "your_observability_service_name"
+	//  if you already have a running service to collect metrics, traces or logs,
+	// then you can simply specify the service name, and your application will
+	// automatically export the corresponding information to your service. E.g.,
+	// jaeger_service = "jaeger-all-in-one" will enable your running Jaeger
+	// "service/jaeger-all-in-one" to capture all the app traces.
+	//
+	// [1] - https://prometheus.io/
+	// [2] - https://www.jaegertracing.io/
+	// [3] - https://grafana.com/oss/loki/
+	// [4] - https://grafana.com/
+	Observability map[string]string
 }
 
 // globalName returns an unique name that persists across app versions.
@@ -344,11 +323,12 @@ func (r *replicaSetInfo) buildContainer() (corev1.Container, error) {
 	// docker image.
 	r.dep.App.Binary = fmt.Sprintf("/weaver/%s", filepath.Base(r.dep.App.Binary))
 	kubeCfgStr, err := proto.ToEnv(&ReplicaSetConfig{
-		Namespace:         r.namespace,
-		Deployment:        r.dep,
-		ReplicaSet:        r.name,
-		ComponentsToStart: r.components,
-		InternalPort:      int32(r.internalPort),
+		Namespace:            r.namespace,
+		Deployment:           r.dep,
+		ReplicaSet:           r.name,
+		ComponentsToStart:    r.components,
+		InternalPort:         int32(r.internalPort),
+		TraceExporterService: r.traceServiceURL,
 	})
 	if err != nil {
 		return corev1.Container{}, err
@@ -455,39 +435,9 @@ func GenerateKubeDeployment(image string, dep *protos.Deployment, cfg *KubeConfi
 	generated = append(generated, content...)
 
 	// Generate deployment info needed to get insights into the application.
-
-	// Generate the Jaeger deployment info.
-	content, err = generateJaegerDeployment(dep, cfg.Namespace)
+	content, err = generateObservabilityInfo(dep, cfg)
 	if err != nil {
-		return fmt.Errorf("unable to create kube jaeger deployment: %w", err)
-	}
-	generated = append(generated, content...)
-
-	// Generate the Prometheus deployment info.
-	content, err = generatePrometheusDeployment(dep, cfg.Namespace)
-	if err != nil {
-		return fmt.Errorf("unable to create kube deployment for the Prometheus service: %w", err)
-	}
-	generated = append(generated, content...)
-
-	// Generate the Loki deployment info.
-	content, err = generateLokiDeployment(dep, cfg.Namespace)
-	if err != nil {
-		return fmt.Errorf("unable to create kube deployment for the Loki service: %w", err)
-	}
-	generated = append(generated, content...)
-
-	// Generate the Promtail deployment info.
-	content, err = generatePromtailDeployment(dep, cfg.Namespace)
-	if err != nil {
-		return fmt.Errorf("unable to create kube deployment for Promtail: %w", err)
-	}
-	generated = append(generated, content...)
-
-	// Generate the Grafana deployment info.
-	content, err = generateGrafanaDeployment(dep, cfg.Namespace)
-	if err != nil {
-		return fmt.Errorf("unable to create kube deployment for the Grafana service: %w", err)
+		return fmt.Errorf("unable to create observability information: %w", err)
 	}
 	generated = append(generated, content...)
 
@@ -636,905 +586,6 @@ func generateAppDeployment(replicaSets map[string]*replicaSetInfo) ([]byte, erro
 	return generated, nil
 }
 
-// generateJaegerDeployment generates the Jaeger kubernetes deployment and service
-// information for a given app in namespace.
-//
-// Note that we run a single instance of Jaeger. This is because we are using
-// a Jaeger image that combines three Jaeger components, agent, collector, and
-// query service/UI in a single image.
-// TODO(rgrandl): If the trace volume can't be handled by a single instance, we
-// should scale these components independently, and use different image(s).
-func generateJaegerDeployment(dep *protos.Deployment, namespace string) ([]byte, error) {
-	jname := name{dep.App.Name, jaegerAppName}.DNSLabel()
-
-	// Generate the Jaeger deployment.
-	d := &appsv1.Deployment{
-		TypeMeta: metav1.TypeMeta{
-			APIVersion: "apps/v1",
-			Kind:       "Deployment",
-		},
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      jname,
-			Namespace: namespace,
-		},
-		Spec: appsv1.DeploymentSpec{
-			Replicas: ptrOf(int32(1)),
-			Selector: &metav1.LabelSelector{
-				MatchLabels: map[string]string{
-					"jaeger": jname,
-				},
-			},
-			Template: corev1.PodTemplateSpec{
-				ObjectMeta: metav1.ObjectMeta{
-					Labels: map[string]string{
-						"jaeger": jname,
-					},
-					Namespace: namespace,
-				},
-				Spec: corev1.PodSpec{
-					Containers: []corev1.Container{
-						{
-							Name:            jname,
-							Image:           fmt.Sprintf("%s:latest", jaegerImageName),
-							ImagePullPolicy: corev1.PullIfNotPresent,
-						},
-					},
-				},
-			},
-			Strategy: v1.DeploymentStrategy{
-				Type:          "RollingUpdate",
-				RollingUpdate: &v1.RollingUpdateDeployment{},
-			},
-		},
-	}
-	content, err := yaml.Marshal(d)
-	if err != nil {
-		return nil, err
-	}
-	var generated []byte
-	generated = append(generated, []byte("# Jaeger Deployment\n")...)
-	generated = append(generated, content...)
-	generated = append(generated, []byte("\n---\n")...)
-	fmt.Fprintf(os.Stderr, "Generated Jaeger deployment\n")
-
-	// Generate the Jaeger service.
-	s := &corev1.Service{
-		TypeMeta: metav1.TypeMeta{
-			APIVersion: "v1",
-			Kind:       "Service",
-		},
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      jname,
-			Namespace: namespace,
-		},
-		Spec: corev1.ServiceSpec{
-			Selector: map[string]string{"jaeger": jname},
-			Ports: []corev1.ServicePort{
-				{
-					Name:       "ui-port",
-					Port:       jaegerUIPort,
-					Protocol:   "TCP",
-					TargetPort: intstr.IntOrString{IntVal: int32(jaegerUIPort)},
-				},
-				{
-					Name:       "collector-port",
-					Port:       jaegerCollectorPort,
-					Protocol:   "TCP",
-					TargetPort: intstr.IntOrString{IntVal: int32(jaegerCollectorPort)},
-				},
-			},
-		},
-	}
-	content, err = yaml.Marshal(s)
-	if err != nil {
-		return nil, err
-	}
-	generated = append(generated, []byte("\n# Jaeger Service\n")...)
-	generated = append(generated, content...)
-	generated = append(generated, []byte("\n---\n")...)
-	fmt.Fprintf(os.Stderr, "Generated Jaeger service\n")
-
-	return generated, nil
-}
-
-// generatePrometheusDeployment generates the kubernetes configurations to deploy
-// a Prometheus service for a given app in namespace.
-//
-// TODO(rgrandl): check if we can simplify the config map, and the deployment info.
-//
-// TODO(rgrandl): We run a single instance of Prometheus for now. We might want
-// to scale it up if it becomes a bottleneck.
-func generatePrometheusDeployment(dep *protos.Deployment, namespace string) ([]byte, error) {
-	cname := name{dep.App.Name, "prometheus", "config"}.DNSLabel()
-	pname := name{dep.App.Name, "prometheus"}.DNSLabel()
-
-	// Build the config map that holds the prometheus configuration file. In the
-	// config we specify how to scrape the app pods for the metrics.
-	config := fmt.Sprintf(`
-global:
-  scrape_interval: 15s
-scrape_configs:
-  - job_name: "%s"
-    metrics_path: %s
-    kubernetes_sd_configs:
-      - role: pod
-        namespaces:
-          names:
-            - %s
-    scheme: http
-    relabel_configs:
-      - source_labels: [__meta_kubernetes_pod_label_metrics]
-        regex: "%s"
-        action: keep
-`, pname, prometheusEndpoint, namespace, dep.App.Name)
-
-	// Create a config map to store the prometheus config.
-	cm := corev1.ConfigMap{
-		TypeMeta: metav1.TypeMeta{
-			Kind:       "ConfigMap",
-			APIVersion: "v1",
-		},
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      cname,
-			Namespace: namespace,
-		},
-		Data: map[string]string{
-			"prometheus.yaml": config,
-		},
-	}
-	content, err := yaml.Marshal(cm)
-	if err != nil {
-		return nil, err
-	}
-	var generated []byte
-	generated = append(generated, []byte(fmt.Sprintf("\n# Config Map %s\n", cname))...)
-	generated = append(generated, content...)
-	generated = append(generated, []byte("\n---\n")...)
-	fmt.Fprintf(os.Stderr, "Generated kube deployment for config map %s\n", cname)
-
-	// Build the kubernetes Prometheus deployment.
-	d := &appsv1.Deployment{
-		TypeMeta: metav1.TypeMeta{
-			APIVersion: "apps/v1",
-			Kind:       "Deployment",
-		},
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      pname,
-			Namespace: namespace,
-		},
-		Spec: appsv1.DeploymentSpec{
-			Replicas: ptrOf(int32(1)),
-			Selector: &metav1.LabelSelector{
-				MatchLabels: map[string]string{"prometheus": pname},
-			},
-			Template: corev1.PodTemplateSpec{
-				ObjectMeta: metav1.ObjectMeta{
-					Labels:    map[string]string{"prometheus": pname},
-					Namespace: namespace,
-				},
-				Spec: corev1.PodSpec{
-					Containers: []corev1.Container{
-						{
-							Name:            pname,
-							Image:           prometheusImageName,
-							ImagePullPolicy: corev1.PullIfNotPresent,
-							Args: []string{
-								fmt.Sprintf("--config.file=/etc/%s/prometheus.yaml", pname),
-								fmt.Sprintf("--storage.tsdb.path=/%s", pname),
-							},
-							Ports: []corev1.ContainerPort{{ContainerPort: metricsPort}},
-							VolumeMounts: []corev1.VolumeMount{
-								{
-									Name:      cname,
-									MountPath: fmt.Sprintf("/etc/%s/prometheus.yaml", pname),
-									SubPath:   "prometheus.yaml",
-								},
-								{
-									Name:      fmt.Sprintf("%s-data", pname),
-									MountPath: fmt.Sprintf("/%s", pname),
-								},
-							},
-						},
-					},
-					Volumes: []corev1.Volume{
-						{
-							Name: cname,
-							VolumeSource: corev1.VolumeSource{
-								ConfigMap: &corev1.ConfigMapVolumeSource{
-									LocalObjectReference: corev1.LocalObjectReference{
-										Name: cname,
-									},
-									Items: []corev1.KeyToPath{
-										{
-											Key:  "prometheus.yaml",
-											Path: "prometheus.yaml",
-										},
-									},
-								},
-							},
-						},
-						{
-							Name: fmt.Sprintf("%s-data", pname),
-						},
-					},
-				},
-			},
-			Strategy: v1.DeploymentStrategy{
-				Type:          "RollingUpdate",
-				RollingUpdate: &v1.RollingUpdateDeployment{},
-			},
-		},
-	}
-	content, err = yaml.Marshal(d)
-	if err != nil {
-		return nil, err
-	}
-	generated = append(generated, []byte(fmt.Sprintf("\n# Prometheus Deployment %s\n", pname))...)
-	generated = append(generated, content...)
-	generated = append(generated, []byte("\n---\n")...)
-	fmt.Fprintf(os.Stderr, "Generated kube deployment for Prometheus %s\n", pname)
-
-	// Build the kubernetes Prometheus service.
-	s := &corev1.Service{
-		TypeMeta: metav1.TypeMeta{
-			APIVersion: "v1",
-			Kind:       "Service",
-		},
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      pname,
-			Namespace: namespace,
-		},
-		Spec: corev1.ServiceSpec{
-			Selector: map[string]string{"prometheus": pname},
-			Ports: []corev1.ServicePort{
-				{
-					Port:       servicePort,
-					Protocol:   "TCP",
-					TargetPort: intstr.IntOrString{IntVal: int32(metricsPort)},
-				},
-			},
-		},
-	}
-	content, err = yaml.Marshal(s)
-	if err != nil {
-		return nil, err
-	}
-	generated = append(generated, []byte(fmt.Sprintf("\n# Prometheus Service %s\n", pname))...)
-	generated = append(generated, content...)
-	generated = append(generated, []byte("\n---\n")...)
-	fmt.Fprintf(os.Stderr, "Generated kube service for Prometheus %s\n", pname)
-	return generated, nil
-}
-
-// generateLokiDeployment generates the kubernetes configurations to deploy
-// a Loki service for a given app in namespace.
-//
-// TODO(rgrandl): check if we can simplify the config map, and the deployment info.
-//
-// TODO(rgrandl): We run a single instance of Loki for now. We might want
-// to scale it up if it becomes a bottleneck.
-func generateLokiDeployment(dep *protos.Deployment, namespace string) ([]byte, error) {
-	cname := name{dep.App.Name, "loki", "config"}.DNSLabel()
-	lname := name{dep.App.Name, "loki"}.DNSLabel()
-
-	timeSchemaEnabledFromFn := func() string {
-		current := time.Now()
-		year, month, day := current.Date()
-		return fmt.Sprintf("%d-%02d-%02d", year, month, day)
-	}
-
-	// Build the config map that holds the Loki configuration file. In the
-	// config we specify how to store the logs and the schema. Right now we have
-	// a very simple in-memory store [1].
-	//
-	// TODO(rgrandl): There are millions of knobs to tune the config. We might revisit
-	// this in the future.
-	//
-	// [1] https://grafana.com/docs/loki/latest/operations/storage/boltdb-shipper/
-	config := fmt.Sprintf(`
-auth_enabled: false
-server:
-  http_listen_port: %d
-
-common:
-  instance_addr: 127.0.0.1
-  path_prefix: /tmp/%s
-  storage:
-    filesystem:
-      chunks_directory: /tmp/%s/chunks
-      rules_directory: /tmp/%s/rules
-  replication_factor: 1
-  ring:
-    kvstore:
-      store: inmemory
-
-schema_config:
-  configs:
-    - from: %s  # Marks the starting point of this schema
-      store: boltdb-shipper
-      object_store: filesystem
-      schema: v11
-      index:
-        prefix: index_
-        period: 24h
-`, lokiPort, lname, lname, lname, timeSchemaEnabledFromFn())
-
-	// Create a config map to store the Loki config.
-	cm := corev1.ConfigMap{
-		TypeMeta: metav1.TypeMeta{
-			Kind:       "ConfigMap",
-			APIVersion: "v1",
-		},
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      cname,
-			Namespace: namespace,
-		},
-		Data: map[string]string{
-			"loki.yaml": config,
-		},
-	}
-	content, err := yaml.Marshal(cm)
-	if err != nil {
-		return nil, err
-	}
-	var generated []byte
-	generated = append(generated, []byte(fmt.Sprintf("\n# Config Map %s\n", cname))...)
-	generated = append(generated, content...)
-	generated = append(generated, []byte("\n---\n")...)
-	fmt.Fprintf(os.Stderr, "Generated kube deployment for config map %s\n", cname)
-
-	// Build the kubernetes Loki deployment.
-	d := &appsv1.Deployment{
-		TypeMeta: metav1.TypeMeta{
-			APIVersion: "apps/v1",
-			Kind:       "Deployment",
-		},
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      lname,
-			Namespace: namespace,
-		},
-		Spec: appsv1.DeploymentSpec{
-			Replicas: ptrOf(int32(1)),
-			Selector: &metav1.LabelSelector{
-				MatchLabels: map[string]string{"loki": lname},
-			},
-			Template: corev1.PodTemplateSpec{
-				ObjectMeta: metav1.ObjectMeta{
-					Labels:    map[string]string{"loki": lname},
-					Namespace: namespace,
-				},
-				Spec: corev1.PodSpec{
-					Containers: []corev1.Container{
-						{
-							Name:            lname,
-							Image:           fmt.Sprintf("%s:latest", lokiImageName),
-							ImagePullPolicy: corev1.PullIfNotPresent,
-							Args: []string{
-								fmt.Sprintf("--config.file=/etc/%s/loki.yaml", lname),
-							},
-							Ports: []corev1.ContainerPort{{ContainerPort: lokiPort}},
-							VolumeMounts: []corev1.VolumeMount{
-								{
-									Name:      cname,
-									MountPath: fmt.Sprintf("/etc/%s/", lname),
-								},
-							},
-						},
-					},
-					Volumes: []corev1.Volume{
-						{
-							Name: cname,
-							VolumeSource: corev1.VolumeSource{
-								ConfigMap: &corev1.ConfigMapVolumeSource{
-									LocalObjectReference: corev1.LocalObjectReference{
-										Name: cname,
-									},
-									Items: []corev1.KeyToPath{
-										{
-											Key:  "loki.yaml",
-											Path: "loki.yaml",
-										},
-									},
-								},
-							},
-						},
-					},
-				},
-			},
-			Strategy: v1.DeploymentStrategy{
-				Type:          "RollingUpdate",
-				RollingUpdate: &v1.RollingUpdateDeployment{},
-			},
-		},
-	}
-	content, err = yaml.Marshal(d)
-	if err != nil {
-		return nil, err
-	}
-	generated = append(generated, []byte(fmt.Sprintf("\n# Loki Deployment %s\n", lname))...)
-	generated = append(generated, content...)
-	generated = append(generated, []byte("\n---\n")...)
-	fmt.Fprintf(os.Stderr, "Generated kube deployment for Loki %s\n", lname)
-
-	// Build the kubernetes Loki service.
-	s := &corev1.Service{
-		TypeMeta: metav1.TypeMeta{
-			APIVersion: "v1",
-			Kind:       "Service",
-		},
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      lname,
-			Namespace: namespace,
-		},
-		Spec: corev1.ServiceSpec{
-			Selector: map[string]string{"loki": lname},
-			Ports: []corev1.ServicePort{
-				{
-					Port:       lokiPort,
-					Protocol:   "TCP",
-					TargetPort: intstr.IntOrString{IntVal: int32(lokiPort)},
-				},
-			},
-		},
-	}
-	content, err = yaml.Marshal(s)
-	if err != nil {
-		return nil, err
-	}
-	generated = append(generated, []byte(fmt.Sprintf("\n# Loki Service %s\n", lname))...)
-	generated = append(generated, content...)
-	generated = append(generated, []byte("\n---\n")...)
-	fmt.Fprintf(os.Stderr, "Generated kube service for Loki %s\n", lname)
-	return generated, nil
-}
-
-// generatePromtailDeployment generates information that is needed to run a
-// Promtail agent on each node in order to scrape the logs.
-func generatePromtailDeployment(dep *protos.Deployment, namespace string) ([]byte, error) {
-	promName := name{dep.App.Name, "promtail"}.DNSLabel()
-	lname := name{dep.App.Name, "loki"}.DNSLabel()
-
-	// This configuration is a simplified version of the Promtail config generated
-	// by helm [1]. Right now we scrape only logs from the pods. We may want to
-	// scrape system information and nodes info as well.
-	//
-	// The scraped logs are sent to Loki for indexing and being stored.
-	//
-	// [1] https://helm.sh/docs/topics/charts/.
-	config := fmt.Sprintf(`
-server:
-  log_format: logfmt
-  http_listen_port: 3101
-
-clients:
-  - url: http://%s:%d/loki/api/v1/push
-
-positions:
-  filename: /run/promtail/positions.yaml
-
-scrape_configs:
-  - job_name: kubernetes-pods
-    kubernetes_sd_configs:
-      - role: pod
-        namespaces:
-          names:
-            - %s
-    relabel_configs:
-      - source_labels:
-          - __meta_kubernetes_pod_label_appName
-        regex: ^.*%s.*$
-        action: keep
-      - source_labels:
-          - __meta_kubernetes_pod_label_appName
-        action: replace
-        target_label: app
-      - source_labels:
-          - __meta_kubernetes_pod_name
-        action: replace
-        target_label: pod
-      - action: replace
-        replacement: /var/log/pods/*$1/*.log
-        separator: /
-        source_labels:
-        - __meta_kubernetes_pod_uid
-        - __meta_kubernetes_pod_container_name
-        target_label: __path__
-`, lname, lokiPort, namespace, dep.App.Name)
-
-	// Config is stored as a config map in the daemonset.
-	cm := corev1.ConfigMap{
-		TypeMeta: metav1.TypeMeta{
-			Kind:       "ConfigMap",
-			APIVersion: "v1",
-		},
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      promName,
-			Namespace: namespace,
-		},
-		Data: map[string]string{
-			"promtail.yaml": config,
-		},
-	}
-
-	content, err := yaml.Marshal(cm)
-	if err != nil {
-		return nil, err
-	}
-	var generated []byte
-	generated = append(generated, []byte(fmt.Sprintf("\n# Config Map %s\n", cm.Name))...)
-	generated = append(generated, content...)
-	generated = append(generated, []byte("\n---\n")...)
-	fmt.Fprintf(os.Stderr, "Generated kube deployment for config map %s\n", cm.Name)
-
-	// Create a daemonset that will run on each node. The daemonset will run promtail
-	// in order to scrape the pods running on each node.
-	dset := appsv1.DaemonSet{
-		TypeMeta: metav1.TypeMeta{
-			Kind:       "DaemonSet",
-			APIVersion: "apps/v1",
-		},
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      promName,
-			Namespace: namespace,
-		},
-		Spec: appsv1.DaemonSetSpec{
-			Selector: &metav1.LabelSelector{
-				MatchLabels: map[string]string{
-					"promtail": promName,
-				},
-			},
-			Template: corev1.PodTemplateSpec{
-				ObjectMeta: metav1.ObjectMeta{
-					Labels: map[string]string{
-						"promtail": promName,
-					},
-					Namespace: namespace,
-				},
-				Spec: corev1.PodSpec{
-					ServiceAccountName: "default",
-					Containers: []corev1.Container{
-						{
-							Name:            promName,
-							Image:           fmt.Sprintf("%s:latest", promtailImageName),
-							ImagePullPolicy: corev1.PullIfNotPresent,
-							Args: []string{
-								fmt.Sprintf("--config.file=/etc/%s/promtail.yaml", promName),
-							},
-							Ports: []corev1.ContainerPort{{ContainerPort: 3101}},
-							Env: []corev1.EnvVar{
-								{
-									Name: "HOSTNAME",
-									ValueFrom: &corev1.EnvVarSource{
-										FieldRef: &corev1.ObjectFieldSelector{
-											FieldPath: "spec.nodeName",
-										},
-									},
-								},
-							},
-							VolumeMounts: []corev1.VolumeMount{
-								{
-									Name:      "config",
-									MountPath: fmt.Sprintf("/etc/%s", promName),
-								},
-								{
-									Name:      "run",
-									MountPath: "/run/promtail",
-								},
-								{
-									Name:      "containers",
-									MountPath: "/var/lib/docker/containers",
-									ReadOnly:  true,
-								},
-								{
-									Name:      "pods",
-									MountPath: "/var/log/pods",
-									ReadOnly:  true,
-								},
-							},
-						},
-					},
-					Volumes: []corev1.Volume{
-						{
-							Name: "config",
-							VolumeSource: corev1.VolumeSource{
-								ConfigMap: &corev1.ConfigMapVolumeSource{
-									LocalObjectReference: corev1.LocalObjectReference{
-										Name: cm.Name,
-									},
-									Items: []corev1.KeyToPath{
-										{
-											Key:  "promtail.yaml",
-											Path: "promtail.yaml",
-										},
-									},
-								},
-							},
-						},
-						{
-							Name: "run",
-							VolumeSource: corev1.VolumeSource{
-								HostPath: &corev1.HostPathVolumeSource{
-									Path: "/run/promtail",
-								},
-							},
-						},
-						{
-							Name: "containers",
-							VolumeSource: corev1.VolumeSource{
-								HostPath: &corev1.HostPathVolumeSource{
-									Path: "/var/lib/docker/containers",
-								},
-							},
-						},
-						{
-							Name: "pods",
-							VolumeSource: corev1.VolumeSource{
-								HostPath: &corev1.HostPathVolumeSource{
-									Path: "/var/log/pods",
-								},
-							},
-						},
-					},
-				},
-			},
-			UpdateStrategy: v1.DaemonSetUpdateStrategy{
-				Type:          "RollingUpdate",
-				RollingUpdate: &v1.RollingUpdateDaemonSet{},
-			},
-		},
-	}
-	content, err = yaml.Marshal(dset)
-	if err != nil {
-		return nil, err
-	}
-	generated = append(generated, []byte(fmt.Sprintf("\n# Promtail DaemonSet %s\n", promName))...)
-	generated = append(generated, content...)
-	generated = append(generated, []byte("\n---\n")...)
-	fmt.Fprintf(os.Stderr, "Generated kube daemonset for Promtail %s\n", promName)
-	return generated, nil
-}
-
-// generateGrafanaDeployment generates the kubernetes configurations to deploy
-// a Grafana service for a given app in namespace.
-//
-// TODO(rgrandl): We run a single instance of Grafana for now. We might want
-// to scale it up if it becomes a bottleneck.
-func generateGrafanaDeployment(dep *protos.Deployment, namespace string) ([]byte, error) {
-	cname := name{dep.App.Name, "grafana", "config"}.DNSLabel()
-	gname := name{dep.App.Name, "grafana"}.DNSLabel()
-	pname := name{dep.App.Name, "prometheus"}.DNSLabel()
-	jname := name{dep.App.Name, jaegerAppName}.DNSLabel()
-	lname := name{dep.App.Name, "loki"}.DNSLabel()
-
-	// Build the config map that holds the Grafana configuration file. In the
-	// config we specify which data source connections the Grafana service should
-	// export. By default, we export the Prometheus and Jaeger services in order to
-	// have a single dashboard where we can visualize the metrics and the traces of
-	// the app.
-	//
-	// TODO(rgrandl): add a data source connection for Loki, to export logs as well.
-	config := fmt.Sprintf(`
-apiVersion: 1
-datasources:
-  - name: Prometheus
-    type: prometheus
-    access: proxy
-    url: http://%s
-    isDefault: true
-  - name: Jaeger
-    type: jaeger
-    url: http://%s:%d
-  - name: Loki
-    type: loki
-    access: proxy
-    url: http://%s:%d
-`, pname, jname, jaegerUIPort, lname, lokiPort)
-
-	// It contains the list of dashboard providers that load dashboards into
-	// Grafana from the local filesystem [1].
-	//
-	// https://grafana.com/docs/grafana/latest/administration/provisioning/#dashboards
-	const dashboard = `
-apiVersion: 1
-providers:
- - name: 'Service Weaver Dashboard'
-   options:
-     path: /etc/grafana/dashboards/default-dashboard.json
-`
-
-	// Create a config map to store the Grafana configs and the default dashboards.
-	cm := corev1.ConfigMap{
-		TypeMeta: metav1.TypeMeta{
-			Kind:       "ConfigMap",
-			APIVersion: "v1",
-		},
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      cname,
-			Namespace: namespace,
-		},
-		Data: map[string]string{
-			"grafana.yaml":           config,
-			"dashboard-config.yaml":  dashboard,
-			"default-dashboard.json": fmt.Sprintf(dashboardContent, dep.App.Name),
-		},
-	}
-	content, err := yaml.Marshal(cm)
-	if err != nil {
-		return nil, err
-	}
-	var generated []byte
-	generated = append(generated, []byte(fmt.Sprintf("\n# Config Map %s\n", cname))...)
-	generated = append(generated, content...)
-	generated = append(generated, []byte("\n---\n")...)
-	fmt.Fprintf(os.Stderr, "Generated kube deployment for config map %s\n", cname)
-
-	// Generate the Grafana deployment.
-	d := &appsv1.Deployment{
-		TypeMeta: metav1.TypeMeta{
-			APIVersion: "apps/v1",
-			Kind:       "Deployment",
-		},
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      gname,
-			Namespace: namespace,
-		},
-		Spec: appsv1.DeploymentSpec{
-			Replicas: ptrOf(int32(1)),
-			Selector: &metav1.LabelSelector{
-				MatchLabels: map[string]string{"grafana": gname},
-			},
-			Template: corev1.PodTemplateSpec{
-				ObjectMeta: metav1.ObjectMeta{
-					Labels:    map[string]string{"grafana": gname},
-					Namespace: namespace,
-				},
-				Spec: corev1.PodSpec{
-					Containers: []corev1.Container{
-						{
-							Name:            gname,
-							Image:           fmt.Sprintf("%s:latest", grafanaImageName),
-							ImagePullPolicy: corev1.PullIfNotPresent,
-							Ports:           []corev1.ContainerPort{{ContainerPort: grafanaPort}},
-							VolumeMounts: []corev1.VolumeMount{
-								{
-									// By default, we have to store any data source connection that
-									// should be exported by Grafana under provisioning/datasources.
-									Name:      "datasource-volume",
-									MountPath: "/etc/grafana/provisioning/datasources/",
-								},
-								{
-									// By default, we need to store the dashboards config files under
-									// provisioning/dashboards directory. Each config file can contain
-									// a list of dashboards providers that load dashboards into Grafana
-									// from the local filesystem. More info here [1].
-									//
-									// [1] https://grafana.com/docs/grafana/latest/administration/provisioning/#dashboards
-									Name:      "dashboards-config",
-									MountPath: "/etc/grafana/provisioning/dashboards/",
-								},
-								{
-									// Mount the volume that stores the predefined dashboards.
-									Name:      "dashboards",
-									MountPath: "/etc/grafana/dashboards/",
-								},
-							},
-							Env: []corev1.EnvVar{
-								// TODO(rgrandl): we may want to enable the user to specify their
-								// credentials in a different way.
-								{
-									Name:  "GF_SECURITY_ADMIN_USER",
-									Value: "admin",
-								},
-								{
-									Name:  "GF_SECURITY_ADMIN_PASSWORD",
-									Value: "admin",
-								},
-							},
-						},
-					},
-					Volumes: []corev1.Volume{
-						{
-							Name: "datasource-volume",
-							VolumeSource: corev1.VolumeSource{
-								ConfigMap: &corev1.ConfigMapVolumeSource{
-									LocalObjectReference: corev1.LocalObjectReference{
-										Name: cname,
-									},
-									Items: []corev1.KeyToPath{
-										{
-											Key:  "grafana.yaml",
-											Path: "grafana.yaml",
-										},
-									},
-								},
-							},
-						},
-						{
-							Name: "dashboards-config",
-							VolumeSource: corev1.VolumeSource{
-								ConfigMap: &corev1.ConfigMapVolumeSource{
-									LocalObjectReference: corev1.LocalObjectReference{
-										Name: cname,
-									},
-									Items: []corev1.KeyToPath{
-										{
-											Key:  "dashboard-config.yaml",
-											Path: "dashboard-config.yaml",
-										},
-									},
-								},
-							},
-						},
-						{
-							Name: "dashboards",
-							VolumeSource: corev1.VolumeSource{
-								ConfigMap: &corev1.ConfigMapVolumeSource{
-									LocalObjectReference: corev1.LocalObjectReference{
-										Name: cname,
-									},
-									Items: []corev1.KeyToPath{
-										{
-											Key:  "default-dashboard.json",
-											Path: "default-dashboard.json",
-										},
-									},
-								},
-							},
-						},
-					},
-				},
-			},
-			Strategy: v1.DeploymentStrategy{
-				Type:          "RollingUpdate",
-				RollingUpdate: &v1.RollingUpdateDeployment{},
-			},
-		},
-	}
-	content, err = yaml.Marshal(d)
-	if err != nil {
-		return nil, err
-	}
-	generated = append(generated, []byte("# Grafana Deployment\n")...)
-	generated = append(generated, content...)
-	generated = append(generated, []byte("\n---\n")...)
-	fmt.Fprintf(os.Stderr, "Generated Grafana deployment\n")
-
-	// Generate the Grafana service.
-	//
-	// TODO(rgrandl): should we create a load balancer instead of a cluster ip?
-	s := &corev1.Service{
-		TypeMeta: metav1.TypeMeta{
-			APIVersion: "v1",
-			Kind:       "Service",
-		},
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      gname,
-			Namespace: namespace,
-		},
-		Spec: corev1.ServiceSpec{
-			Selector: map[string]string{"grafana": gname},
-			Ports: []corev1.ServicePort{
-				{
-					Name:       "ui-port",
-					Port:       servicePort,
-					Protocol:   "TCP",
-					TargetPort: intstr.IntOrString{IntVal: int32(grafanaPort)},
-				},
-			},
-		},
-	}
-	content, err = yaml.Marshal(s)
-	if err != nil {
-		return nil, err
-	}
-	generated = append(generated, []byte("\n# Grafana Service\n")...)
-	generated = append(generated, content...)
-	generated = append(generated, []byte("\n---\n")...)
-	fmt.Fprintf(os.Stderr, "Generated Grafana service\n")
-
-	return generated, nil
-}
-
 // buildReplicaSetSpecs returns the replica sets specs for the deployment dep
 // keyed by the replica set.
 func buildReplicaSetSpecs(dep *protos.Deployment, image string, cfg *KubeConfig) (
@@ -1547,17 +598,30 @@ func buildReplicaSetSpecs(dep *protos.Deployment, image string, cfg *KubeConfig)
 		return nil, err
 	}
 
+	// Compute the URL of the export traces service.
+	var exportTracesURLInfo string
+	val := cfg.Observability[exportTracesURL]
+	exportTracesURLIsSet := val != "" && val != "none"
+	if exportTracesURLIsSet {
+		exportTracesURLInfo = fmt.Sprintf("http://%s:%d/api/traces", val, jaegerCollectorPort)
+	} else {
+		if val != "none" {
+			exportTracesURLInfo = fmt.Sprintf("http://%s:%d/api/traces", name{dep.App.Name, jaegerAppName}.DNSLabel(), jaegerCollectorPort)
+		}
+	}
+
 	// Build the replica sets.
 	for c, listeners := range components {
 		rsName := replicaSet(c, dep)
 		if _, found := rsets[rsName]; !found {
 			rsets[rsName] = &replicaSetInfo{
-				name:         rsName,
-				image:        image,
-				namespace:    cfg.Namespace,
-				dep:          dep,
-				components:   map[string]*ReplicaSetConfig_Listeners{},
-				internalPort: internalPort,
+				name:            rsName,
+				image:           image,
+				namespace:       cfg.Namespace,
+				dep:             dep,
+				components:      map[string]*ReplicaSetConfig_Listeners{},
+				internalPort:    internalPort,
+				traceServiceURL: exportTracesURLInfo,
 			}
 		}
 

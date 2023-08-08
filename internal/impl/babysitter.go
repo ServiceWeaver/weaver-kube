@@ -91,16 +91,25 @@ func RunBabysitter(ctx context.Context) error {
 	}
 
 	// Create the trace exporter.
-	collector := name{cfg.Deployment.App.Name, jaegerAppName}.DNSLabel()
-	endpoint := fmt.Sprintf("http://%s:%d/api/traces", collector, jaegerCollectorPort)
-	traceExporter, err :=
-		jaeger.New(jaeger.WithCollectorEndpoint(jaeger.WithEndpoint(endpoint)))
-	if err != nil {
-		return err
+	isTraceExporterServiceRunning := cfg.TraceExporterService != ""
+	var traceExporter *jaeger.Exporter
+	if isTraceExporterServiceRunning {
+		// Export traces iff there is a tracing service running that is able to receive
+		// these traces.
+		traceExporter, err =
+			jaeger.New(jaeger.WithCollectorEndpoint(jaeger.WithEndpoint(cfg.TraceExporterService)))
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Unable to create trace exporter: %v\n", err)
+			return err
+		}
 	}
 	defer traceExporter.Shutdown(ctx) //nolint:errcheck // response write error
 
 	exportTraces := func(spans *protos.TraceSpans) error {
+		if !isTraceExporterServiceRunning {
+			return nil
+		}
+
 		var spansToExport []trace.ReadOnlySpan
 		for _, span := range spans.Span {
 			spansToExport = append(spansToExport, &traces.ReadSpan{Span: span})
