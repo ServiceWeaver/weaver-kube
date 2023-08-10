@@ -35,24 +35,24 @@ import (
 // create an agent abstraction that is used by the babysitters to export
 // observability info. Different implementations of these agents will behave
 // differently. For example, a Jaeger agent, will simply export traces to a Jaeger
-// service. A Prometheus agent will export a /metrics endpoin that can be scraped
-// by a Prometheus service. Another agent might want to convert the otel traces to
+// service. A Prometheus agent will export a /metrics endpoint that can be scraped
+// by a Prometheus service. Another agent might want to convert otel traces to
 // a different format and export it (e.g., Elastic). This way, we can add agent
 // implementations for any observability systems.
 
 const (
 	// The names of the observability services that interact with the application.
-	exportTracesURL  = "jaeger_service"
-	exportMetricsURL = "prometheus_service"
-	exportLogsURL    = "loki_service"
-	exportGrafanaURL = "grafana_service"
+	tracesConfigKey  = "jaeger_service"
+	metricsConfigKey = "prometheus_service"
+	logsConfigKey    = "loki_service"
+	grafanaConfigKey = "grafana_service"
 
 	// Jaeger related configs.
 
-	// The name of the Jaeger application.
+	// Name of the Jaeger application.
 	jaegerAppName = "jaeger"
 
-	// The name of the jaeger image used to handle the traces.
+	// Name of the Jaeger [1] container image used for automatically started Jaeger service.
 	//
 	// all-in-one[1] combines the three Jaeger components: agent, collector, and
 	// query service/UI in a single binary, which is enough for handling the traces
@@ -62,51 +62,87 @@ const (
 	// traces are available, even if the deployment is deleted.
 	//
 	// [1] https://www.jaegertracing.io/docs/1.45/deployment/#all-in-one
-	jaegerImageName = "jaegertracing/all-in-one"
+	autoJaegerImageName = "jaegertracing/all-in-one"
 
 	// The port on which the Jaeger UI agent is listening on.
-	jaegerUIPort = 16686
+	//
+	// Note that this is expected to be the default port [1] for both the automatically
+	// started Jaeger UI agent and the one started by the user.
+	//
+	// [1] https://www.jaegertracing.io/docs/1.6/getting-started/
+	defaultJaegerUIPort = 16686
 
 	// The port on which the Jaeger collector is receiving traces from the
 	// clients when using the Jaeger exporter.
-	jaegerCollectorPort = 14268
+	//
+	// Note that this is expected to be the default port [1] for both the automatically
+	// started Jaeger collector and the one started by the user.
+	//
+	// [1] https://www.jaegertracing.io/docs/1.6/getting-started/
+	defaultJaegerCollectorPort = 14268
 
 	// Prometheus related configs.
 
-	// The name of the Prometheus [1] image used to handle the metrics.
+	// Name of the Prometheus [1] container image used for automatically started Prometheus service.
 	//
 	// [1] https://prometheus.io/
-	prometheusImageName = "prom/prometheus:v2.30.3"
+	autoPrometheusImageName = "prom/prometheus:v2.30.3"
 
 	// The port on which the weavelets are exporting the metrics.
-	metricsPort = 9090
+	//
+	// Note that this is expected to be the default port [1] for both the automatically
+	// started Prometheus and the one started by the user.
+	//
+	// [1] https://opensource.com/article/18/12/introduction-prometheus
+	defaultMetricsPort = 9090
 
 	// Loki related configs.
 
-	// The name of the Loki [1] image used to handle the logs.
+	// Name of the Loki [1] container image used for automatically started Loki service.
 	//
 	// [1] https://grafana.com/oss/loki/
-	lokiImageName = "grafana/loki"
+	autoLokiImageName = "grafana/loki"
 
 	// The port on which Loki is exporting the logs.
-	lokiPort = 3100
+	//
+	// Note that this is expected to be the default port [1] for both the automatically
+	// started Loki and the one started by the user.
+	//
+	// [1] https://grafana.com/docs/loki/latest/configuration/
+	defaultLokiPort = 3100
 
 	// Promtail related configs.
 
-	// The name of the Promtail [1] image used to scrape the logs.
+	// Name of the Promtail [1] container image used for automatically started Promtail.
 	//
 	// [1] https://grafana.com/docs/loki/latest/clients/promtail/
-	promtailImageName = "grafana/promtail"
+	autoPromtailImageName = "grafana/promtail"
 
 	// Grafana related configs.
 
-	// The name of the Grafana [1] image used to display metrics, traces, and logs.
+	// Name of the Grafana [1] container image used for automatically started Grafana.
 	//
 	// [1] https://grafana.com/
-	grafanaImageName = "grafana/grafana"
+	autoGrafanaImageName = "grafana/grafana"
 
 	// The default Grafana web server port.
-	grafanaPort = 3000
+	//
+	// Note that this is expected to be the default port [1] for both the automatically
+	// started Grafana and the one started by the user.
+	//
+	// [1] https://grafana.com/docs/grafana/latest/setup-grafana/configure-grafana/
+	defaultGrafanaPort = 3000
+
+	// The below values are used to check the values passed through app config
+	// for different observability services.
+
+	// Set iff the kube deployer should generate Kubernetes configs to deploy
+	// a service.
+	auto = ""
+
+	// Set iff the user requires that the corresponding service should be disabled
+	// entirely. I.e., neither the user started the service nor the Kube deployer.
+	disabled = "none"
 )
 
 // dashboard was generated using the Grafana UI. Then, we saved the content as
@@ -115,39 +151,42 @@ const (
 //go:embed dashboard.txt
 var dashboardContent string
 
-// generateObservabilityInfo generates deployment information needed by the app
-// to export metrics, logs, and traces.
-func generateObservabilityInfo(dep *protos.Deployment, cfg *KubeConfig) ([]byte, error) {
-	content, err := generateInfoToExportTraces(dep, cfg)
+// generateObservabilityConfigs generates Kubernetes configurations for exporting
+// applications' metrics, logs, and traces.
+func generateObservabilityConfigs(dep *protos.Deployment, cfg *KubeConfig) ([]byte, error) {
+	configs, err := generateConfigsToExportTraces(dep, cfg)
 	if err != nil {
-		return nil, fmt.Errorf("unable to create kube info to export traces: %w", err)
+		return nil, fmt.Errorf("unable to create kube configs to export traces: %w", err)
 	}
 	var generated []byte
-	generated = append(generated, content...)
+	generated = append(generated, configs...)
 
-	content, err = generateInfoToExportMetrics(dep, cfg)
+	configs, err = generateConfigsToExportMetrics(dep, cfg)
 	if err != nil {
-		return nil, fmt.Errorf("unable to create kube info to export metrics: %w", err)
+		return nil, fmt.Errorf("unable to create kube configs to export metrics: %w", err)
 	}
-	generated = append(generated, content...)
+	generated = append(generated, configs...)
 
-	content, err = generateInfoToExportLogs(dep, cfg)
+	configs, err = generateConfigsToExportLogs(dep, cfg)
 	if err != nil {
-		return nil, fmt.Errorf("unable to create kube info to export logs: %w", err)
+		return nil, fmt.Errorf("unable to create kube configs to export logs: %w", err)
 	}
-	generated = append(generated, content...)
+	generated = append(generated, configs...)
 
-	// Generate deployment info to export logs, traces and metrics to Grafana.
-	content, err = generateInfoToExportToGrafana(dep, cfg)
+	// Generate Kubernetes configs to export logs, traces and metrics to Grafana.
+	configs, err = generateConfigsToExportToGrafana(dep, cfg)
 	if err != nil {
-		return nil, fmt.Errorf("unable to create kube info to export data to Grafana: %w", err)
+		return nil, fmt.Errorf("unable to create kube configs to export data to Grafana: %w", err)
 	}
-	generated = append(generated, content...)
+	generated = append(generated, configs...)
 	return generated, nil
 }
 
-// generateInfoToExportTraces generates the Jaeger kubernetes deployment
-// information for a given app.
+// generateConfigsToExportTraces generates Jaeger Kubernetes deployment
+// configurations for a given app.
+//
+// Note that the configs should be generated iff the kube deployer automatically
+// runs a Jaeger service along with the app.
 //
 // Note that we run a single instance of Jaeger. This is because we are using
 // a Jaeger image that combines three Jaeger components, agent, collector, and
@@ -171,9 +210,9 @@ func generateObservabilityInfo(dep *protos.Deployment, cfg *KubeConfig) ([]byte,
 // observability = {jaeger_service = "jaeger-all-in-one"}
 //
 // [1] https://helm.sh/
-func generateInfoToExportTraces(dep *protos.Deployment, cfg *KubeConfig) ([]byte, error) {
+func generateConfigsToExportTraces(dep *protos.Deployment, cfg *KubeConfig) ([]byte, error) {
 	// The user disabled exporting the traces, don't generate anything.
-	if !shouldGenerateKubeDeploymentInfo(exportTracesURL, cfg) {
+	if cfg.Observability[tracesConfigKey] != auto {
 		return nil, nil
 	}
 
@@ -207,7 +246,7 @@ func generateInfoToExportTraces(dep *protos.Deployment, cfg *KubeConfig) ([]byte
 					Containers: []corev1.Container{
 						{
 							Name:            jname,
-							Image:           fmt.Sprintf("%s:latest", jaegerImageName),
+							Image:           fmt.Sprintf("%s:latest", autoJaegerImageName),
 							ImagePullPolicy: corev1.PullIfNotPresent,
 						},
 					},
@@ -244,15 +283,15 @@ func generateInfoToExportTraces(dep *protos.Deployment, cfg *KubeConfig) ([]byte
 			Ports: []corev1.ServicePort{
 				{
 					Name:       "ui-port",
-					Port:       jaegerUIPort,
+					Port:       defaultJaegerUIPort,
 					Protocol:   "TCP",
-					TargetPort: intstr.IntOrString{IntVal: int32(jaegerUIPort)},
+					TargetPort: intstr.IntOrString{IntVal: int32(defaultJaegerUIPort)},
 				},
 				{
 					Name:       "collector-port",
-					Port:       jaegerCollectorPort,
+					Port:       defaultJaegerCollectorPort,
 					Protocol:   "TCP",
-					TargetPort: intstr.IntOrString{IntVal: int32(jaegerCollectorPort)},
+					TargetPort: intstr.IntOrString{IntVal: int32(defaultJaegerCollectorPort)},
 				},
 			},
 		},
@@ -269,7 +308,7 @@ func generateInfoToExportTraces(dep *protos.Deployment, cfg *KubeConfig) ([]byte
 	return generated, nil
 }
 
-// generateInfoToExportMetrics generates the Prometheus kubernetes deployment
+// generateConfigsToExportMetrics generates the Prometheus kubernetes deployment
 // information for a given app.
 //
 // TODO(rgrandl): Convert the below comments into docs.
@@ -317,24 +356,28 @@ func generateInfoToExportTraces(dep *protos.Deployment, cfg *KubeConfig) ([]byte
 // observability = {prometheus_service = "prometheus-server"}
 //
 // [1] https://helm.sh/
-func generateInfoToExportMetrics(dep *protos.Deployment, cfg *KubeConfig) ([]byte, error) {
+func generateConfigsToExportMetrics(dep *protos.Deployment, cfg *KubeConfig) ([]byte, error) {
 	// The user disabled exporting the metrics, don't generate anything.
-	if cfg.Observability[exportMetricsURL] == "none" {
+	if cfg.Observability[metricsConfigKey] == disabled {
 		return nil, nil
 	}
 
 	// Generate configs to configure Prometheus to scrape metrics from the app.
-	// These are needed if we use an existing Prometheus service or if we generate
-	// our own service.
 	var generated []byte
-	content, err := generateConfigsToExportMetrics(dep, cfg)
+	content, err := generatePrometheusConfigs(dep, cfg)
 	if err != nil {
 		return nil, err
 	}
 	generated = append(generated, content...)
 
-	// Generate kubernetes deployment info for Prometheus.
-	content, err = generateDeploymentToExportMetrics(dep, cfg)
+	// Generate the Prometheus kubernetes deployment info iff the kube deployer
+	// should automatically start the Prometheus service.
+	if cfg.Observability[metricsConfigKey] != auto {
+		return generated, nil
+	}
+
+	// Generate kubernetes service configs for Prometheus.
+	content, err = generatePrometheusServiceConfigs(dep, cfg)
 	if err != nil {
 		return nil, err
 	}
@@ -343,9 +386,12 @@ func generateInfoToExportMetrics(dep *protos.Deployment, cfg *KubeConfig) ([]byt
 	return generated, nil
 }
 
-// generateConfigsToExportMetrics generate configs needed by the Prometheus service
+// generatePrometheusConfigs generate configs needed by the Prometheus service
 // to export metrics.
-func generateConfigsToExportMetrics(dep *protos.Deployment, cfg *KubeConfig) ([]byte, error) {
+//
+// Note that these configs are needed by both the automatically started Prometheus
+// service and the one started by the user.
+func generatePrometheusConfigs(dep *protos.Deployment, cfg *KubeConfig) ([]byte, error) {
 	cname := name{dep.App.Name, "prometheus", "config"}.DNSLabel()
 	pname := name{dep.App.Name, "prometheus"}.DNSLabel()
 
@@ -400,18 +446,15 @@ scrape_configs:
 	return generated, nil
 }
 
-// generateDeploymentToExportMetrics generates the Prometheus kubernetes deployment
-// information for a given app.
+// generatePrometheusServiceConfigs generates the Prometheus kubernetes
+// service information for a given app.
+//
+// Note that the configs should be generated iff the kube deployer automatically
+// runs a Prometheus service along with the app.
 //
 // TODO(rgrandl): We run a single instance of Prometheus for now. We might want
 // to scale it up if it becomes a bottleneck.
-func generateDeploymentToExportMetrics(dep *protos.Deployment, cfg *KubeConfig) ([]byte, error) {
-	// Generate the Prometheus kubernetes deployment info iff the kube deployer
-	// should deploy the Prometheus service.
-	if !shouldGenerateKubeDeploymentInfo(exportMetricsURL, cfg) {
-		return nil, nil
-	}
-
+func generatePrometheusServiceConfigs(dep *protos.Deployment, cfg *KubeConfig) ([]byte, error) {
 	cname := name{dep.App.Name, "prometheus", "config"}.DNSLabel()
 	pname := name{dep.App.Name, "prometheus"}.DNSLabel()
 
@@ -439,13 +482,13 @@ func generateDeploymentToExportMetrics(dep *protos.Deployment, cfg *KubeConfig) 
 					Containers: []corev1.Container{
 						{
 							Name:            pname,
-							Image:           prometheusImageName,
+							Image:           autoPrometheusImageName,
 							ImagePullPolicy: corev1.PullIfNotPresent,
 							Args: []string{
 								fmt.Sprintf("--config.file=/etc/%s/prometheus.yaml", pname),
 								fmt.Sprintf("--storage.tsdb.path=/%s", pname),
 							},
-							Ports: []corev1.ContainerPort{{ContainerPort: metricsPort}},
+							Ports: []corev1.ContainerPort{{ContainerPort: defaultMetricsPort}},
 							VolumeMounts: []corev1.VolumeMount{
 								{
 									Name:      cname,
@@ -515,7 +558,7 @@ func generateDeploymentToExportMetrics(dep *protos.Deployment, cfg *KubeConfig) 
 				{
 					Port:       servicePort,
 					Protocol:   "TCP",
-					TargetPort: intstr.IntOrString{IntVal: int32(metricsPort)},
+					TargetPort: intstr.IntOrString{IntVal: int32(defaultMetricsPort)},
 				},
 			},
 		},
@@ -532,7 +575,7 @@ func generateDeploymentToExportMetrics(dep *protos.Deployment, cfg *KubeConfig) 
 	return generated, nil
 }
 
-// generateInfoToExportLogs generates the Loki/Promtail kubernetes deployment
+// generateConfigsToExportLogs generates the Loki/Promtail kubernetes deployment
 // information for a given app.
 //
 // Note that for the Loki to be able to aggregate logs, we need to run Promtail
@@ -589,23 +632,40 @@ func generateDeploymentToExportMetrics(dep *protos.Deployment, cfg *KubeConfig) 
 //	it will automatically add your Loki service as a datasource.
 //
 // [1] https://helm.sh/
-func generateInfoToExportLogs(dep *protos.Deployment, cfg *KubeConfig) ([]byte, error) {
+func generateConfigsToExportLogs(dep *protos.Deployment, cfg *KubeConfig) ([]byte, error) {
 	// The user disabled exporting the logs, don't generate anything.
-	if cfg.Observability[exportLogsURL] == "none" {
+	if cfg.Observability[logsConfigKey] == disabled {
 		return nil, nil
 	}
 
-	// Generate configs. These are needed if we use an existing Loki/Promtail
-	// service or if we generate our own service.
+	// Generate configs to configure Loki/Promtail.
 	var generated []byte
-	content, err := generateConfigsToExportLogs(dep, cfg)
+	content, err := generateLokiConfigs(dep, cfg)
 	if err != nil {
 		return nil, err
 	}
 	generated = append(generated, content...)
 
-	// Generate kubernetes deployment info for Loki/Promtail.
-	content, err = generateDeploymentToExportLogs(dep, cfg)
+	content, err = generatePromtailConfigs(dep, cfg)
+	if err != nil {
+		return nil, err
+	}
+	generated = append(generated, content...)
+
+	// Generate the Loki/Promtail kubernetes deployment configs iff the kube deployer
+	// should deploy the Loki/Promtail.
+	if cfg.Observability[logsConfigKey] != auto {
+		return generated, nil
+	}
+
+	// Generate kubernetes service configs for Loki/Promtail.
+	content, err = generateLokiServiceConfigs(dep, cfg)
+	if err != nil {
+		return nil, err
+	}
+	generated = append(generated, content...)
+
+	content, err = generatePromtailAgentConfigs(dep, cfg)
 	if err != nil {
 		return nil, err
 	}
@@ -614,30 +674,14 @@ func generateInfoToExportLogs(dep *protos.Deployment, cfg *KubeConfig) ([]byte, 
 	return generated, nil
 }
 
-// generateConfigsToExportLogs generate configs needed by the Loki service and
-// the Promtail agent to export and aggregate logs.
+// generateLokiConfigs generate configs needed by a Loki service to
+// aggregate app logs.
+//
+// Note that these configs are needed by both the automatically started Loki
+// service and the one started by the user.
 //
 // TODO(rgrandl): check if we can simplify the configurations.
-func generateConfigsToExportLogs(dep *protos.Deployment, cfg *KubeConfig) ([]byte, error) {
-	var generated []byte
-	content, err := generateConfigsToExportLoki(dep, cfg)
-	if err != nil {
-		return nil, err
-	}
-	generated = append(generated, content...)
-
-	content, err = generateConfigsToExportPromtail(dep, cfg)
-	if err != nil {
-		return nil, err
-	}
-	generated = append(generated, content...)
-
-	return generated, nil
-}
-
-// generateConfigsToExportLoki generate configs needed by a Loki service to
-// aggregate app logs.
-func generateConfigsToExportLoki(dep *protos.Deployment, cfg *KubeConfig) ([]byte, error) {
+func generateLokiConfigs(dep *protos.Deployment, cfg *KubeConfig) ([]byte, error) {
 	cname := name{dep.App.Name, "loki", "config"}.DNSLabel()
 	lname := name{dep.App.Name, "loki"}.DNSLabel()
 
@@ -681,7 +725,7 @@ schema_config:
       index:
         prefix: index_
         period: 24h
-`, lokiPort, lname, lname, lname, timeSchemaEnabledFromFn())
+`, defaultLokiPort, lname, lname, lname, timeSchemaEnabledFromFn())
 
 	// Create a config map to store the Loki config.
 	cm := corev1.ConfigMap{
@@ -711,15 +755,27 @@ schema_config:
 	return generated, nil
 }
 
-// generateConfigsToExportPromtail generates configuration needed to enable Promtail
+// generatePromtailConfigs generates configuration needed to enable Promtail
 // to retrieve the app logs.
-func generateConfigsToExportPromtail(dep *protos.Deployment, cfg *KubeConfig) ([]byte, error) {
+//
+// Note that these configs are needed by both the automatically started Promtail
+// agent and the one started by the user.
+//
+// TODO(rgrandl): check if we can simplify the configurations.
+func generatePromtailConfigs(dep *protos.Deployment, cfg *KubeConfig) ([]byte, error) {
 	promName := name{dep.App.Name, "promtail"}.DNSLabel()
-	lokiURL := name{dep.App.Name, "loki"}.DNSLabel()
-	val := cfg.Observability[exportLogsURL]
-	exportTracesURLIsSet := val != "" && val != "none"
-	if exportTracesURLIsSet {
-		lokiURL = val
+
+	var lokiURL string
+	lservice := cfg.Observability[logsConfigKey]
+	switch {
+	case lservice == auto:
+		// lokiURL should point to the Loki service generated by Kube.
+		lokiURL = name{dep.App.Name, "loki"}.DNSLabel()
+	case lservice != disabled:
+		// lokiURL should point to the Loki service provided by the user.
+		lokiURL = lservice
+	default:
+		// No Loki service URL to set.
 	}
 
 	// This configuration is a simplified version of the Promtail config generated
@@ -767,7 +823,7 @@ scrape_configs:
         - __meta_kubernetes_pod_uid
         - __meta_kubernetes_pod_container_name
         target_label: __path__
-`, lokiURL, lokiPort, cfg.Namespace, dep.App.Name)
+`, lokiURL, defaultLokiPort, cfg.Namespace, dep.App.Name)
 
 	// Config is stored as a config map in the daemonset.
 	cm := corev1.ConfigMap{
@@ -797,37 +853,15 @@ scrape_configs:
 	return generated, nil
 }
 
-// generateDeploymentToExportLogs generates the Loki/Promtail kubernetes deployment
-// and service information for a given app.
-func generateDeploymentToExportLogs(dep *protos.Deployment, cfg *KubeConfig) ([]byte, error) {
-	// Generate the Loki/Promtail kubernetes deployment info iff the kube deployer
-	// should deploy the Loki/Promtail service.
-	if !shouldGenerateKubeDeploymentInfo(exportLogsURL, cfg) {
-		return nil, nil
-	}
-
-	var generated []byte
-	content, err := generateDeploymentToExportLoki(dep, cfg)
-	if err != nil {
-		return nil, err
-	}
-	generated = append(generated, content...)
-
-	content, err = generateDeploymentToExportPromtail(dep, cfg)
-	if err != nil {
-		return nil, err
-	}
-	generated = append(generated, content...)
-
-	return generated, nil
-}
-
-// generateDeploymentToExportLoki generates the kubernetes deployment info to
-// deploy a Loki service.
+// generateLokiServiceConfigs generates the Loki kubernetes service information
+// for a given app.
+//
+// Note that the configs should be generated iff the kube deployer automatically
+// runs a Loki service along with the app.
 //
 // TODO(rgrandl): We run a single instance of Loki for now. We might want to
 // scale it up if it becomes a bottleneck.
-func generateDeploymentToExportLoki(dep *protos.Deployment, cfg *KubeConfig) ([]byte, error) {
+func generateLokiServiceConfigs(dep *protos.Deployment, cfg *KubeConfig) ([]byte, error) {
 	// Build the kubernetes Loki deployment.
 	cname := name{dep.App.Name, "loki", "config"}.DNSLabel()
 	lname := name{dep.App.Name, "loki"}.DNSLabel()
@@ -855,12 +889,12 @@ func generateDeploymentToExportLoki(dep *protos.Deployment, cfg *KubeConfig) ([]
 					Containers: []corev1.Container{
 						{
 							Name:            lname,
-							Image:           fmt.Sprintf("%s:latest", lokiImageName),
+							Image:           fmt.Sprintf("%s:latest", autoLokiImageName),
 							ImagePullPolicy: corev1.PullIfNotPresent,
 							Args: []string{
 								fmt.Sprintf("--config.file=/etc/%s/loki.yaml", lname),
 							},
-							Ports: []corev1.ContainerPort{{ContainerPort: lokiPort}},
+							Ports: []corev1.ContainerPort{{ContainerPort: defaultLokiPort}},
 							VolumeMounts: []corev1.VolumeMount{
 								{
 									Name:      cname,
@@ -920,9 +954,9 @@ func generateDeploymentToExportLoki(dep *protos.Deployment, cfg *KubeConfig) ([]
 			Selector: map[string]string{"loki": lname},
 			Ports: []corev1.ServicePort{
 				{
-					Port:       lokiPort,
+					Port:       defaultLokiPort,
 					Protocol:   "TCP",
-					TargetPort: intstr.IntOrString{IntVal: int32(lokiPort)},
+					TargetPort: intstr.IntOrString{IntVal: int32(defaultLokiPort)},
 				},
 			},
 		},
@@ -939,9 +973,12 @@ func generateDeploymentToExportLoki(dep *protos.Deployment, cfg *KubeConfig) ([]
 	return generated, nil
 }
 
-// generateDeploymentToExportPromtail generates the deployment info to deploy a
-// Promtail daemonset on each node in the cluster.
-func generateDeploymentToExportPromtail(dep *protos.Deployment, cfg *KubeConfig) ([]byte, error) {
+// generatePromtailAgentConfigs generates the Promtail kubernetes configs
+// to deploy Promtail on each node in the cluster.
+//
+// Note that the configs should be generated iff the kube deployer automatically
+// runs Promtail along with the app.
+func generatePromtailAgentConfigs(dep *protos.Deployment, cfg *KubeConfig) ([]byte, error) {
 	// Create a Promtail daemonset that will run on each node. The daemonset will
 	// run in order to scrape the pods running on each node.
 	promName := name{dep.App.Name, "promtail"}.DNSLabel()
@@ -972,7 +1009,7 @@ func generateDeploymentToExportPromtail(dep *protos.Deployment, cfg *KubeConfig)
 					Containers: []corev1.Container{
 						{
 							Name:            promName,
-							Image:           fmt.Sprintf("%s:latest", promtailImageName),
+							Image:           fmt.Sprintf("%s:latest", autoPromtailImageName),
 							ImagePullPolicy: corev1.PullIfNotPresent,
 							Args: []string{
 								fmt.Sprintf("--config.file=/etc/%s/promtail.yaml", promName),
@@ -1074,7 +1111,7 @@ func generateDeploymentToExportPromtail(dep *protos.Deployment, cfg *KubeConfig)
 	return generated, nil
 }
 
-// generateInfoToExportToGrafana generates the Grafana kubernetes deployment
+// generateConfigsToExportToGrafana generates the Grafana kubernetes deployment
 // information for a given app.
 //
 // TODO(rgrandl): Convert the below comments into docs.
@@ -1106,13 +1143,13 @@ func generateDeploymentToExportPromtail(dep *protos.Deployment, cfg *KubeConfig)
 // the configured datasources.
 //
 // [1] https://helm.sh/
-func generateInfoToExportToGrafana(dep *protos.Deployment, cfg *KubeConfig) ([]byte, error) {
+func generateConfigsToExportToGrafana(dep *protos.Deployment, cfg *KubeConfig) ([]byte, error) {
 	// The user disabled Grafana, don't generate anything.
-	if cfg.Observability[exportGrafanaURL] == "none" {
+	if cfg.Observability[grafanaConfigKey] == disabled {
 		return nil, nil
 	}
 
-	// Generate configs.
+	// Generate configs needed to configure Grafana.
 	var generated []byte
 	content, err := generateGrafanaConfigs(dep, cfg)
 	if err != nil {
@@ -1120,8 +1157,14 @@ func generateInfoToExportToGrafana(dep *protos.Deployment, cfg *KubeConfig) ([]b
 	}
 	generated = append(generated, content...)
 
-	// Generate deployment info for Grafana.
-	content, err = generateGrafanaDeployment(dep, cfg)
+	// Generate the Grafana kubernetes deployment info iff the kube deployer should
+	// deploy the Grafana service.
+	if cfg.Observability[grafanaConfigKey] != auto {
+		return generated, nil
+	}
+
+	// Generate kubernetes service configs needed to run Grafana.
+	content, err = generateGrafanaServiceConfigs(dep, cfg)
 	if err != nil {
 		return nil, err
 	}
@@ -1149,13 +1192,16 @@ datasources:
 
 	// Set up the Jaeger data source (if any).
 	var jaegerURL string
-	val := cfg.Observability[exportTracesURL]
-	if val == "" {
-		// Jaeger service will start along the app deployment.
-		jaegerURL = fmt.Sprintf("http://%s:%d", name{dep.App.Name, jaegerAppName}.DNSLabel(), jaegerUIPort)
-	} else if val != "none" {
-		// Jaeger service already started by the user.
-		jaegerURL = fmt.Sprintf("http://%s:%d", val, jaegerUIPort)
+	jservice := cfg.Observability[tracesConfigKey]
+	switch {
+	case jservice == auto:
+		// jaegerURL should point to the Jaeger service generated by the Kube deployer.
+		jaegerURL = fmt.Sprintf("http://%s:%d", name{dep.App.Name, jaegerAppName}.DNSLabel(), defaultJaegerUIPort)
+	case jservice != disabled:
+		// jaegerURL should point to the Jaeger service provided by the user.
+		jaegerURL = fmt.Sprintf("http://%s:%d", jservice, defaultJaegerUIPort)
+	default:
+		// No Jaeger service URL to set.
 	}
 	if jaegerURL != "" {
 		config = fmt.Sprintf(`
@@ -1168,13 +1214,16 @@ datasources:
 
 	// Set up the Prometheus data source (if any).
 	var prometheusURL string
-	val = cfg.Observability[exportMetricsURL]
-	if val == "" {
-		// Prometheus service will start along the app deployment.
+	pservice := cfg.Observability[metricsConfigKey]
+	switch {
+	case pservice == auto:
+		// prometheusURL should point to the Prometheus service generated by the Kube deployer.
 		prometheusURL = fmt.Sprintf("http://%s", name{dep.App.Name, "prometheus"}.DNSLabel())
-	} else if val != "none" {
-		// Prometheus service already started by the user.
-		prometheusURL = fmt.Sprintf("http://%s", val)
+	case pservice != disabled:
+		// prometheusURL should point to the Prometheus service provided by the user.
+		prometheusURL = fmt.Sprintf("http://%s", pservice)
+	default:
+		// No Prometheus service URL to set.
 	}
 	if prometheusURL != "" {
 		config = fmt.Sprintf(`
@@ -1189,13 +1238,16 @@ datasources:
 
 	// Set up the Loki data source (if any).
 	var lokiURL string
-	val = cfg.Observability[exportLogsURL]
-	if val == "" {
-		// Loki service will start along the app deployment.
-		lokiURL = fmt.Sprintf("http://%s:%d", name{dep.App.Name, "loki"}.DNSLabel(), lokiPort)
-	} else if val != "none" {
-		// Loki service already started by the user.
-		lokiURL = fmt.Sprintf("http://%s:%d", val, lokiPort)
+	lservice := cfg.Observability[logsConfigKey]
+	switch {
+	case lservice == auto:
+		// lokiURL should point to the Loki service generated by the Kube deployer.
+		lokiURL = fmt.Sprintf("http://%s:%d", name{dep.App.Name, "loki"}.DNSLabel(), defaultLokiPort)
+	case lservice != disabled:
+		// lokiURL should point to the Loki service provided by the user.
+		lokiURL = fmt.Sprintf("http://%s:%d", lservice, defaultLokiPort)
+	default:
+		// No Loki service URL to set.
 	}
 	if lokiURL != "" {
 		// Note that we add a custom HTTP header 'X-Scope-OrgID' to make Grafana
@@ -1258,18 +1310,15 @@ providers:
 	return generated, nil
 }
 
-// generateGrafanaDeployment generates the kubernetes configurations to deploy
+// generateGrafanaServiceConfigs generates the kubernetes configurations to deploy
 // a Grafana service for a given app.
+//
+// Note that the configs should be generated iff the kube deployer automatically
+// runs Grafana along with the app.
 //
 // TODO(rgrandl): We run a single instance of Grafana for now. We might want
 // to scale it up if it becomes a bottleneck.
-func generateGrafanaDeployment(dep *protos.Deployment, cfg *KubeConfig) ([]byte, error) {
-	// Generate the Grafana kubernetes deployment info iff the kube deployer should
-	// deploy the Grafana service.
-	if !shouldGenerateKubeDeploymentInfo(exportGrafanaURL, cfg) {
-		return nil, nil
-	}
-
+func generateGrafanaServiceConfigs(dep *protos.Deployment, cfg *KubeConfig) ([]byte, error) {
 	cname := name{dep.App.Name, "grafana", "config"}.DNSLabel()
 	gname := name{dep.App.Name, "grafana"}.DNSLabel()
 
@@ -1297,9 +1346,9 @@ func generateGrafanaDeployment(dep *protos.Deployment, cfg *KubeConfig) ([]byte,
 					Containers: []corev1.Container{
 						{
 							Name:            gname,
-							Image:           fmt.Sprintf("%s:latest", grafanaImageName),
+							Image:           fmt.Sprintf("%s:latest", autoGrafanaImageName),
 							ImagePullPolicy: corev1.PullIfNotPresent,
-							Ports:           []corev1.ContainerPort{{ContainerPort: grafanaPort}},
+							Ports:           []corev1.ContainerPort{{ContainerPort: defaultGrafanaPort}},
 							VolumeMounts: []corev1.VolumeMount{
 								{
 									// By default, we have to store any data source connection that
@@ -1425,7 +1474,7 @@ func generateGrafanaDeployment(dep *protos.Deployment, cfg *KubeConfig) ([]byte,
 					Name:       "ui-port",
 					Port:       servicePort,
 					Protocol:   "TCP",
-					TargetPort: intstr.IntOrString{IntVal: int32(grafanaPort)},
+					TargetPort: intstr.IntOrString{IntVal: int32(defaultGrafanaPort)},
 				},
 			},
 		},
@@ -1440,10 +1489,4 @@ func generateGrafanaDeployment(dep *protos.Deployment, cfg *KubeConfig) ([]byte,
 	fmt.Fprintf(os.Stderr, "Generated Grafana service\n")
 
 	return generated, nil
-}
-
-// shouldGenerateKubeDeploymentInfo returns true iff a Kubernetes deployment info
-// should be generated for service.
-func shouldGenerateKubeDeploymentInfo(service string, cfg *KubeConfig) bool {
-	return cfg.Observability[service] == ""
 }

@@ -124,25 +124,25 @@ type KubeConfig struct {
 	// specified, the deployer will launch corresponding services for exporting logs,
 	// metrics and traces automatically.
 	//
-	// We support the following observability services:
-	// prometheus_service - to export metrics to Prometheus [1]
-	// jaeger_service     - to export traces to Jaeger [2]
-	// loki_service       - to export logs to Grafana Loki [3]
-	// grafana_service    - to visualize/manipulate observability information [4]
+	// The key must be one of the following strings:
+	// "prometheus_service" - to export metrics to Prometheus [1]
+	// "jaeger_service"     - to export traces to Jaeger [2]
+	// "loki_service"       - to export logs to Grafana Loki [3]
+	// "grafana_service"    - to visualize/manipulate observability information [4]
 	//
 	// Possible values for each service:
 	// 1) do not specify a value at all; leave it empty
-	// this is the default value; kube deployer will automatically create the
+	// this is the default behavior; kube deployer will automatically create the
 	// observability service for you.
 	//
 	// 2) "none"
 	// kube deployer will not export the corresponding observability information to
-	// any service. E.g., prometheus_service = "none", it means that the user will
-	// not be able to see any metrics at all. This can be useful for testing or
+	// any service. E.g., prometheus_service = "none" means that the user will not
+	// be able to see any metrics at all. This can be useful for testing or
 	// benchmarking the performance of your application.
 	//
 	// 3) "your_observability_service_name"
-	//  if you already have a running service to collect metrics, traces or logs,
+	// if you already have a running service to collect metrics, traces or logs,
 	// then you can simply specify the service name, and your application will
 	// automatically export the corresponding information to your service. E.g.,
 	// jaeger_service = "jaeger-all-in-one" will enable your running Jaeger
@@ -323,12 +323,12 @@ func (r *replicaSetInfo) buildContainer() (corev1.Container, error) {
 	// docker image.
 	r.dep.App.Binary = fmt.Sprintf("/weaver/%s", filepath.Base(r.dep.App.Binary))
 	kubeCfgStr, err := proto.ToEnv(&ReplicaSetConfig{
-		Namespace:            r.namespace,
-		Deployment:           r.dep,
-		ReplicaSet:           r.name,
-		ComponentsToStart:    r.components,
-		InternalPort:         int32(r.internalPort),
-		TraceExporterService: r.traceServiceURL,
+		Namespace:         r.namespace,
+		Deployment:        r.dep,
+		ReplicaSet:        r.name,
+		ComponentsToStart: r.components,
+		InternalPort:      int32(r.internalPort),
+		TraceServiceUrl:   r.traceServiceURL,
 	})
 	if err != nil {
 		return corev1.Container{}, err
@@ -360,7 +360,7 @@ func (r *replicaSetInfo) buildContainer() (corev1.Container, error) {
 
 		// Expose the metrics port from the container, so it can be discoverable for
 		// scraping by Prometheus.
-		Ports: []corev1.ContainerPort{{ContainerPort: metricsPort}},
+		Ports: []corev1.ContainerPort{{ContainerPort: defaultMetricsPort}},
 
 		// Enabling TTY and Stdin allows the user to run a shell inside the container,
 		// for debugging.
@@ -435,9 +435,9 @@ func GenerateKubeDeployment(image string, dep *protos.Deployment, cfg *KubeConfi
 	generated = append(generated, content...)
 
 	// Generate deployment info needed to get insights into the application.
-	content, err = generateObservabilityInfo(dep, cfg)
+	content, err = generateObservabilityConfigs(dep, cfg)
 	if err != nil {
-		return fmt.Errorf("unable to create observability information: %w", err)
+		return fmt.Errorf("unable to create configuration information: %w", err)
 	}
 	generated = append(generated, content...)
 
@@ -599,15 +599,17 @@ func buildReplicaSetSpecs(dep *protos.Deployment, image string, cfg *KubeConfig)
 	}
 
 	// Compute the URL of the export traces service.
-	var exportTracesURLInfo string
-	val := cfg.Observability[exportTracesURL]
-	exportTracesURLIsSet := val != "" && val != "none"
-	if exportTracesURLIsSet {
-		exportTracesURLInfo = fmt.Sprintf("http://%s:%d/api/traces", val, jaegerCollectorPort)
-	} else {
-		if val != "none" {
-			exportTracesURLInfo = fmt.Sprintf("http://%s:%d/api/traces", name{dep.App.Name, jaegerAppName}.DNSLabel(), jaegerCollectorPort)
-		}
+	var traceServiceURL string
+	jservice := cfg.Observability[tracesConfigKey]
+	switch {
+	case jservice == auto:
+		// Point to the service launched by the kube deployer.
+		traceServiceURL = fmt.Sprintf("http://%s:%d/api/traces", name{dep.App.Name, jaegerAppName}.DNSLabel(), defaultJaegerCollectorPort)
+	case jservice != disabled:
+		// Point to the service launched by the user.
+		traceServiceURL = fmt.Sprintf("http://%s:%d/api/traces", jservice, defaultJaegerCollectorPort)
+	default:
+		// No trace to export.
 	}
 
 	// Build the replica sets.
@@ -621,7 +623,7 @@ func buildReplicaSetSpecs(dep *protos.Deployment, image string, cfg *KubeConfig)
 				dep:             dep,
 				components:      map[string]*ReplicaSetConfig_Listeners{},
 				internalPort:    internalPort,
-				traceServiceURL: exportTracesURLInfo,
+				traceServiceURL: traceServiceURL,
 			}
 		}
 
