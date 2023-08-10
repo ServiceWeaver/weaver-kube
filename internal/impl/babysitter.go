@@ -21,6 +21,7 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"path/filepath"
 	"sync"
 
 	"github.com/ServiceWeaver/weaver-kube/internal/proto"
@@ -35,6 +36,7 @@ import (
 	"go.opentelemetry.io/otel/exporters/jaeger"
 	"go.opentelemetry.io/otel/sdk/trace"
 	"golang.org/x/exp/maps"
+	"golang.org/x/exp/slog"
 	v1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/watch"
@@ -47,6 +49,9 @@ import (
 // [1] https://prometheus.io
 const prometheusEndpoint = "/metrics"
 
+// The directory where "weaver kube" stores data.
+var logDir = filepath.Join(runtime.LogsDir(), "kube")
+
 // babysitter starts and manages a weavelet inside the Pod.
 type babysitter struct {
 	ctx          context.Context
@@ -54,6 +59,8 @@ type babysitter struct {
 	envelope     *envelope.Envelope
 	exportTraces func(spans *protos.TraceSpans) error
 	clientset    *kubernetes.Clientset
+
+	logger *slog.Logger
 
 	// printer pretty prints log entries.
 	printer *logging.PrettyPrinter
@@ -90,17 +97,42 @@ func RunBabysitter(ctx context.Context) error {
 		return err
 	}
 
-	// Create the trace exporter.
-	collector := name{cfg.Deployment.App.Name, jaegerAppName}.DNSLabel()
-	endpoint := fmt.Sprintf("http://%s:%d/api/traces", collector, jaegerCollectorPort)
-	traceExporter, err :=
-		jaeger.New(jaeger.WithCollectorEndpoint(jaeger.WithEndpoint(endpoint)))
+	// Create the logger.
+	fs, err := logging.NewFileStore(logDir)
 	if err != nil {
-		return err
+		return fmt.Errorf("cannot create log storage: %w", err)
+	}
+	logSaver := fs.Add
+	logger := slog.New(&logging.LogHandler{
+		Opts: logging.Options{
+			App:       cfg.Deployment.App.Name,
+			Component: "deployer",
+			Weavelet:  uuid.NewString(),
+			Attrs:     []string{"serviceweaver/system", ""},
+		},
+		Write: logSaver,
+	})
+
+	// Create the trace exporter.
+	shouldExportTraces := cfg.TraceServiceUrl != ""
+	var traceExporter *jaeger.Exporter
+	if shouldExportTraces {
+		// Export traces iff there is a tracing service running that is able to receive
+		// these traces.
+		traceExporter, err =
+			jaeger.New(jaeger.WithCollectorEndpoint(jaeger.WithEndpoint(cfg.TraceServiceUrl)))
+		if err != nil {
+			logger.Error("Unable to create trace exporter", "err", err)
+			return err
+		}
 	}
 	defer traceExporter.Shutdown(ctx) //nolint:errcheck // response write error
 
 	exportTraces := func(spans *protos.TraceSpans) error {
+		if !shouldExportTraces {
+			return nil
+		}
+
 		var spansToExport []trace.ReadOnlySpan
 		for _, span := range spans.Span {
 			spansToExport = append(spansToExport, &traces.ReadSpan{Span: span})
@@ -125,6 +157,7 @@ func RunBabysitter(ctx context.Context) error {
 		envelope:     e,
 		exportTraces: exportTraces,
 		clientset:    clientset,
+		logger:       logger,
 		printer:      logging.NewPrettyPrinter(false /*colors disabled*/),
 		watching:     map[string]struct{}{},
 	}
@@ -139,9 +172,9 @@ func RunBabysitter(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("error getting local hostname: %w", err)
 	}
-	lis, err := net.Listen("tcp", fmt.Sprintf("%s:%d", host, metricsPort))
+	lis, err := net.Listen("tcp", fmt.Sprintf("%s:%d", host, defaultMetricsPort))
 	if err != nil {
-		return fmt.Errorf("unable to listen on port %d: %w", metricsPort, err)
+		return fmt.Errorf("unable to listen on port %d: %w", defaultMetricsPort, err)
 	}
 	mux := http.NewServeMux()
 	mux.HandleFunc(prometheusEndpoint, func(w http.ResponseWriter, r *http.Request) {

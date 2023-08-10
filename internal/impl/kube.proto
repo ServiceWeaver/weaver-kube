@@ -35,4 +35,5 @@ message ReplicaSetConfig {
   map<string, Listeners> components_to_start = 3;
   int32 internal_port = 4;
   string namespace = 5;
+  string trace_service_url = 6;
 }
