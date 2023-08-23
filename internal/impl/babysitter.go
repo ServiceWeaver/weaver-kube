@@ -18,6 +18,7 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"log/slog"
 	"net"
 	"net/http"
 	"os"
@@ -36,7 +37,6 @@ import (
 	"go.opentelemetry.io/otel/exporters/jaeger"
 	"go.opentelemetry.io/otel/sdk/trace"
 	"golang.org/x/exp/maps"
-	"golang.org/x/exp/slog"
 	v1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/watch"
@@ -82,15 +82,19 @@ func RunBabysitter(ctx context.Context) error {
 	if err := proto.FromEnv(val, cfg); err != nil {
 		return err
 	}
+	host, err := os.Hostname()
+	if err != nil {
+		return fmt.Errorf("error getting local hostname: %w", err)
+	}
 
 	// Create the envelope.
 	wlet := &protos.EnvelopeInfo{
-		App:          cfg.Deployment.App.Name,
-		DeploymentId: cfg.Deployment.Id,
-		Id:           uuid.New().String(),
-		Sections:     cfg.Deployment.App.Sections,
-		RunMain:      cfg.ReplicaSet == runtime.Main,
-		InternalPort: cfg.InternalPort,
+		App:             cfg.Deployment.App.Name,
+		DeploymentId:    cfg.Deployment.Id,
+		Id:              uuid.New().String(),
+		Sections:        cfg.Deployment.App.Sections,
+		RunMain:         cfg.ReplicaSet == runtime.Main,
+		InternalAddress: fmt.Sprintf("%s:%d", host, cfg.InternalPort),
 	}
 	e, err := envelope.NewEnvelope(ctx, wlet, cfg.Deployment.App)
 	if err != nil {
@@ -168,10 +172,6 @@ func RunBabysitter(ctx context.Context) error {
 	}
 
 	// Run a http server that exports the metrics.
-	host, err := os.Hostname()
-	if err != nil {
-		return fmt.Errorf("error getting local hostname: %w", err)
-	}
 	lis, err := net.Listen("tcp", fmt.Sprintf("%s:%d", host, defaultMetricsPort))
 	if err != nil {
 		return fmt.Errorf("unable to listen on port %d: %w", defaultMetricsPort, err)
