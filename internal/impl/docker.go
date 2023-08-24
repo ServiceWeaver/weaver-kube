@@ -36,7 +36,7 @@ import (
 // runtime errors (e.g., glibc).
 var dockerfileTmpl = template.Must(template.New("Dockerfile").Parse(`
 {{if . }}
-FROM golang:1.20-bullseye as builder
+FROM golang:bullseye as builder
 RUN echo ""{{range .}} && go install {{.}}{{end}}
 {{end}}
 FROM ubuntu:rolling
