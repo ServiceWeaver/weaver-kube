@@ -30,7 +30,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
     - name: Debug
-      run: echo "$GITHUB_CONTEXT"
+      run: echo ${{ github.actor }}
     - name: Check out the repository
       uses: actions/checkout@v3
 
