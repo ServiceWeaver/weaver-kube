@@ -30,7 +30,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
     - name: Debug
-      run: echo ${{ github.actor }}
+      run: echo ${{ github.actor }}; echo ${{ github.triggering_actor }}
     - name: Check out the repository
       uses: actions/checkout@v3
 
@@ -50,7 +50,7 @@ jobs:
       uses: docker/login-action@v2
       with:
         registry: ghcr.io
-        username: ${{ github.actor }}
+        username: ${{ github.triggering_actor }}
         password: ${{ secrets.GITHUB_TOKEN }}
 
     - name: Install weaver-kube
