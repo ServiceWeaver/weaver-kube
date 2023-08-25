@@ -26,8 +26,7 @@ import (
 	"github.com/ServiceWeaver/weaver/runtime/protos"
 	"golang.org/x/exp/maps"
 	appsv1 "k8s.io/api/apps/v1"
-	v1 "k8s.io/api/apps/v1"
-	v2 "k8s.io/api/autoscaling/v2"
+	autoscalingv2 "k8s.io/api/autoscaling/v2"
 	_ "k8s.io/api/autoscaling/v2beta2"
 	corev1 "k8s.io/api/core/v1"
 	rbacv1 "k8s.io/api/rbac/v1"
@@ -170,7 +169,7 @@ func (r *replicaSetInfo) deploymentName() string {
 // TODO(rgrandl): test to see if it works with an app where a component foo is
 // collocated with main, and a component bar that is not collocated with main
 // calls foo.
-func (r *replicaSetInfo) buildDeployment() (*v1.Deployment, error) {
+func (r *replicaSetInfo) buildDeployment() (*appsv1.Deployment, error) {
 	matchLabels := map[string]string{}
 	podLabels := map[string]string{
 		"appName": r.dep.App.Name,
@@ -215,9 +214,9 @@ func (r *replicaSetInfo) buildDeployment() (*v1.Deployment, error) {
 					Containers: []corev1.Container{container},
 				},
 			},
-			Strategy: v1.DeploymentStrategy{
+			Strategy: appsv1.DeploymentStrategy{
 				Type:          "RollingUpdate",
-				RollingUpdate: &v1.RollingUpdateDeployment{},
+				RollingUpdate: &appsv1.RollingUpdateDeployment{},
 			},
 			// Number of old ReplicaSets to retain to allow rollback.
 			RevisionHistoryLimit: ptrOf(int32(1)),
@@ -272,7 +271,7 @@ func (r *replicaSetInfo) buildListenerService(lis *ReplicaSetConfig_Listener) (*
 }
 
 // buildAutoscaler generates a kubernetes horizontal pod autoscaler for a replica set.
-func (r *replicaSetInfo) buildAutoscaler() (*v2.HorizontalPodAutoscaler, error) {
+func (r *replicaSetInfo) buildAutoscaler() (*autoscalingv2.HorizontalPodAutoscaler, error) {
 	// Per deployment name that is app version specific.
 	aname := name{r.dep.App.Name, "hpa", r.name, r.dep.Id[:8]}.DNSLabel()
 
@@ -282,7 +281,7 @@ func (r *replicaSetInfo) buildAutoscaler() (*v2.HorizontalPodAutoscaler, error) 
 	} else {
 		depName = r.deploymentName()
 	}
-	return &v2.HorizontalPodAutoscaler{
+	return &autoscalingv2.HorizontalPodAutoscaler{
 		TypeMeta: metav1.TypeMeta{
 			APIVersion: "autoscaling/v2",
 			Kind:       "HorizontalPodAutoscaler",
@@ -291,23 +290,23 @@ func (r *replicaSetInfo) buildAutoscaler() (*v2.HorizontalPodAutoscaler, error) 
 			Name:      aname,
 			Namespace: r.namespace,
 		},
-		Spec: v2.HorizontalPodAutoscalerSpec{
-			ScaleTargetRef: v2.CrossVersionObjectReference{
+		Spec: autoscalingv2.HorizontalPodAutoscalerSpec{
+			ScaleTargetRef: autoscalingv2.CrossVersionObjectReference{
 				APIVersion: "apps/v1",
 				Kind:       "Deployment",
 				Name:       depName,
 			},
 			MinReplicas: ptrOf(int32(1)),
 			MaxReplicas: 10,
-			Metrics: []v2.MetricSpec{
+			Metrics: []autoscalingv2.MetricSpec{
 				{
 					// The pods are scaled up/down when the average CPU
 					// utilization is above/below 80%.
-					Type: v2.ResourceMetricSourceType,
-					Resource: &v2.ResourceMetricSource{
+					Type: autoscalingv2.ResourceMetricSourceType,
+					Resource: &autoscalingv2.ResourceMetricSource{
 						Name: corev1.ResourceCPU,
-						Target: v2.MetricTarget{
-							Type:               v2.UtilizationMetricType,
+						Target: autoscalingv2.MetricTarget{
+							Type:               autoscalingv2.UtilizationMetricType,
 							AverageUtilization: ptrOf(int32(80)),
 						},
 					},

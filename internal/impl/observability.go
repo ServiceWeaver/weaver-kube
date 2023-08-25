@@ -22,7 +22,6 @@ import (
 
 	"github.com/ServiceWeaver/weaver/runtime/protos"
 	appsv1 "k8s.io/api/apps/v1"
-	v1 "k8s.io/api/apps/v1"
 	_ "k8s.io/api/autoscaling/v2beta2"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -252,9 +251,9 @@ func generateConfigsToExportTraces(dep *protos.Deployment, cfg *KubeConfig) ([]b
 					},
 				},
 			},
-			Strategy: v1.DeploymentStrategy{
+			Strategy: appsv1.DeploymentStrategy{
 				Type:          "RollingUpdate",
-				RollingUpdate: &v1.RollingUpdateDeployment{},
+				RollingUpdate: &appsv1.RollingUpdateDeployment{},
 			},
 		},
 	}
@@ -525,9 +524,9 @@ func generatePrometheusServiceConfigs(dep *protos.Deployment, cfg *KubeConfig) (
 					},
 				},
 			},
-			Strategy: v1.DeploymentStrategy{
+			Strategy: appsv1.DeploymentStrategy{
 				Type:          "RollingUpdate",
-				RollingUpdate: &v1.RollingUpdateDeployment{},
+				RollingUpdate: &appsv1.RollingUpdateDeployment{},
 			},
 		},
 	}
@@ -923,9 +922,9 @@ func generateLokiServiceConfigs(dep *protos.Deployment, cfg *KubeConfig) ([]byte
 					},
 				},
 			},
-			Strategy: v1.DeploymentStrategy{
+			Strategy: appsv1.DeploymentStrategy{
 				Type:          "RollingUpdate",
-				RollingUpdate: &v1.RollingUpdateDeployment{},
+				RollingUpdate: &appsv1.RollingUpdateDeployment{},
 			},
 		},
 	}
@@ -1091,9 +1090,9 @@ func generatePromtailAgentConfigs(dep *protos.Deployment, cfg *KubeConfig) ([]by
 					},
 				},
 			},
-			UpdateStrategy: v1.DaemonSetUpdateStrategy{
+			UpdateStrategy: appsv1.DaemonSetUpdateStrategy{
 				Type:          "RollingUpdate",
-				RollingUpdate: &v1.RollingUpdateDaemonSet{},
+				RollingUpdate: &appsv1.RollingUpdateDaemonSet{},
 			},
 		},
 	}
@@ -1438,9 +1437,9 @@ func generateGrafanaServiceConfigs(dep *protos.Deployment, cfg *KubeConfig) ([]b
 					},
 				},
 			},
-			Strategy: v1.DeploymentStrategy{
+			Strategy: appsv1.DeploymentStrategy{
 				Type:          "RollingUpdate",
-				RollingUpdate: &v1.RollingUpdateDeployment{},
+				RollingUpdate: &appsv1.RollingUpdateDeployment{},
 			},
 		},
 	}

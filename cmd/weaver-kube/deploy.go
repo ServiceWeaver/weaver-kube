@@ -22,7 +22,6 @@ import (
 	"os"
 
 	"github.com/ServiceWeaver/weaver-kube/internal/impl"
-	"github.com/ServiceWeaver/weaver/runtime"
 	swruntime "github.com/ServiceWeaver/weaver/runtime"
 	"github.com/ServiceWeaver/weaver/runtime/bin"
 	"github.com/ServiceWeaver/weaver/runtime/codegen"
@@ -106,7 +105,7 @@ func deploy(ctx context.Context, args []string) error {
 
 	// Parse and validate the kube section of the config.
 	config := &impl.KubeConfig{}
-	if err := runtime.ParseConfigSection(configKey, shortConfigKey, app.Sections, config); err != nil {
+	if err := swruntime.ParseConfigSection(configKey, shortConfigKey, app.Sections, config); err != nil {
 		return fmt.Errorf("parse kube config: %w", err)
 	}
 	if config.Image == "" {
