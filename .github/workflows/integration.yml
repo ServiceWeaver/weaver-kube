@@ -16,7 +16,7 @@ name: Integration Test
 
 env:
     CONFIG_FILE: deploy.toml
-    IMAGE_NAME: 192.168.50.2:5000/echo
+    REPO_URL: 192.168.50.2:5000
     WAIT_TIMEOUT: "5m"
 
 on:
@@ -69,17 +69,20 @@ jobs:
         binary = "./examples/echo/echo"
 
         [kube]
-        image = "${{ env.IMAGE_NAME }}"
+        repo = "${{ env.REPO_URL }}"
         listeners.echo = {public = true}
         EOF
         )
         echo "$CONFIG" > ${{ env.CONFIG_FILE }}
 
     - name: Build the docker image and push
-      run: ./cmd/weaver-kube/weaver-kube deploy --runInDevMode ${{ env.CONFIG_FILE }}
+      run: |
+        WEAVER_YAML=$(./cmd/weaver-kube/weaver-kube deploy --runInDevMode ${{ env.CONFIG_FILE }})
+        echo "Generated YAML file:" $WEAVER_YAML
+        echo "WEAVER_YAML=$WEAVER_YAML" >> $GITHUB_ENV
     
     - name: Deploy the application
-      run: kubectl apply -f ./kube_*.yaml
+      run: kubectl apply -f ${{env.WEAVER_YAML}}
 
     - name: Get the name of the echo listener service
       run: |

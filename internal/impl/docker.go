@@ -19,6 +19,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"path"
 	"path/filepath"
 	"runtime"
 	"text/template"
@@ -48,101 +49,47 @@ COPY --from=builder /go/bin/ /weaver/
 ENTRYPOINT ["/weaver/weaver-kube"]
 `))
 
-// imageSpecs holds information about a container image build.
-type imageSpecs struct {
-	name      string   // name is the name of the image to build
+// buildSpec holds information about a container image build.
+type buildSpec struct {
+	tag       string   // tag is the container build tag
 	files     []string // files that should be copied to the container
 	goInstall []string // binary targets that should be 'go install'-ed
 }
 
-// BuildAndUploadDockerImage builds a docker image and upload it to docker hub.
-func BuildAndUploadDockerImage(ctx context.Context, dep *protos.Deployment, image string, runInDevMode bool) (string, error) {
-	// Create the docker image specifications.
-	specs, err := buildImageSpecs(dep, image, runInDevMode)
+// BuildAndUploadDockerImage builds a docker image and uploads it to a remote
+// repo, if one is specified. It returns the docker image tag that should
+// be used in the application containers.
+func BuildAndUploadDockerImage(ctx context.Context, dep *protos.Deployment, buildTag, dockerRepo string, runInDevMode bool) (string, error) {
+	// Create the build specifications.
+	spec, err := dockerBuildSpec(dep, buildTag, runInDevMode)
 	if err != nil {
-		return "", fmt.Errorf("unable to build image specs: %w", err)
+		return "", fmt.Errorf("unable to build image spec: %w", err)
 	}
 
 	// Build the docker image.
-	if err := buildImage(ctx, specs); err != nil {
+	if err := buildImage(ctx, spec); err != nil {
 		return "", fmt.Errorf("unable to create image: %w", err)
 	}
 
-	// Upload the docker image to docker hub.
-	if err := uploadImage(ctx, specs.name); err != nil {
-		return "", fmt.Errorf("unable to upload image: %w", err)
-	}
-	return specs.name, nil
-}
-
-// buildImage creates a docker image with specs.
-func buildImage(ctx context.Context, specs *imageSpecs) error {
-	fmt.Fprintf(os.Stderr, greenText(), fmt.Sprintf("Building image %s...", specs.name))
-	// Create:
-	//  workDir/
-	//    file1
-	//    file2
-	//    ...
-	//    fileN
-	//    Dockerfile   - docker build instructions
-	//    tool binary
-	ctx, cancel := context.WithTimeout(ctx, time.Second*120)
-	defer cancel()
-
-	// Create workDir/.
-	workDir := filepath.Join(os.TempDir(), fmt.Sprintf("weaver%s", uuid.New().String()))
-	if err := os.Mkdir(workDir, 0o700); err != nil {
-		return err
-	}
-	defer os.RemoveAll(workDir)
-
-	// Copy the files from specs to workDir/.
-	for _, file := range specs.files {
-		workDirFile := filepath.Join(workDir, filepath.Base(filepath.Clean(file)))
-		if err := cp(file, workDirFile); err != nil {
-			return err
+	tag := spec.tag
+	if dockerRepo != "" {
+		// Push the docker image to the repo.
+		if tag, err = pushImage(ctx, tag, dockerRepo); err != nil {
+			return "", fmt.Errorf("unable to push image: %w", err)
 		}
 	}
-
-	// Create a Dockerfile in workDir/.
-	dockerFile, err := os.Create(filepath.Join(workDir, dockerfileTmpl.Name()))
-	if err != nil {
-		return err
-	}
-	if err := dockerfileTmpl.Execute(dockerFile, specs.goInstall); err != nil {
-		dockerFile.Close()
-		return err
-	}
-	if err := dockerFile.Close(); err != nil {
-		return err
-	}
-	return dockerBuild(ctx, workDir, specs.name)
+	return tag, nil
 }
 
-// Use docker-cli to build the docker image.
-func dockerBuild(ctx context.Context, buildContext, tag string) error {
-	c := exec.CommandContext(ctx, "docker", "build", buildContext, "-t", tag)
-	c.Stdout = os.Stdout
-	c.Stderr = os.Stderr
-	return c.Run()
-}
-
-// uploadImage upload image appImage to docker hub.
-func uploadImage(ctx context.Context, appImage string) error {
-	fmt.Fprintf(os.Stderr, greenText(), fmt.Sprintf("\nUploading image %s...", appImage))
-
-	c := exec.CommandContext(ctx, "docker", "push", appImage)
-	c.Stdout = os.Stdout
-	c.Stderr = os.Stderr
-	return c.Run()
-}
-
-// buildImageSpecs build the docker image specs for an app deployment.
-func buildImageSpecs(dep *protos.Deployment, image string, runInDevMode bool) (*imageSpecs, error) {
+// dockerBuildSpec creates a build specification for an app deployment.
+func dockerBuildSpec(dep *protos.Deployment, buildTag string, runInDevMode bool) (*buildSpec, error) {
 	files := []string{dep.App.Binary}
 	toolVersion := fmt.Sprintf("v%d.%d.%d", version.Major, version.Minor, version.Patch)
 	goInstall := []string{
 		"github.com/ServiceWeaver/weaver-kube/cmd/weaver-kube@" + toolVersion,
+	}
+	if buildTag == "" {
+		buildTag = fmt.Sprintf("%s:%s", dep.App.Name, dep.Id[:8])
 	}
 
 	// If we run the kube deployer in the development mode, we should copy the
@@ -157,9 +104,82 @@ func buildImageSpecs(dep *protos.Deployment, image string, runInDevMode bool) (*
 		goInstall = []string{}
 	}
 
-	return &imageSpecs{
-		name:      fmt.Sprintf("%s:%s", image, dep.Id[:8]),
+	return &buildSpec{
+		tag:       buildTag,
 		files:     files,
 		goInstall: goInstall,
 	}, nil
+}
+
+// buildImage builds a docker image with a given spec.
+func buildImage(ctx context.Context, spec *buildSpec) error {
+	fmt.Fprintf(os.Stderr, greenText(), fmt.Sprintf("Building image %s...", spec.tag))
+	// Create:
+	//  workDir/
+	//    file1
+	//    file2
+	//    ...
+	//    fileN
+	//    Dockerfile   - docker build instructions
+	ctx, cancel := context.WithTimeout(ctx, time.Second*120)
+	defer cancel()
+
+	// Create workDir/.
+	workDir := filepath.Join(os.TempDir(), fmt.Sprintf("weaver%s", uuid.New().String()))
+	if err := os.Mkdir(workDir, 0o700); err != nil {
+		return err
+	}
+	defer os.RemoveAll(workDir)
+
+	// Copy the files from spec.files to workDir/.
+	for _, file := range spec.files {
+		workDirFile := filepath.Join(workDir, filepath.Base(filepath.Clean(file)))
+		if err := cp(file, workDirFile); err != nil {
+			return err
+		}
+	}
+
+	// Create a Dockerfile in workDir/.
+	dockerFile, err := os.Create(filepath.Join(workDir, dockerfileTmpl.Name()))
+	if err != nil {
+		return err
+	}
+	if err := dockerfileTmpl.Execute(dockerFile, spec.goInstall); err != nil {
+		dockerFile.Close()
+		return err
+	}
+	if err := dockerFile.Close(); err != nil {
+		return err
+	}
+	return dockerBuild(ctx, workDir, spec.tag)
+}
+
+// dockerBuild builds a docker image given a directory and an image tag.
+func dockerBuild(ctx context.Context, dir, tag string) error {
+	fmt.Fprintln(os.Stderr, "Building with tag:", tag)
+	c := exec.CommandContext(ctx, "docker", "build", dir, "-t", tag)
+	c.Stdout = os.Stderr
+	c.Stderr = os.Stderr
+	return c.Run()
+}
+
+// pushImage pushes a docker image with a given build tag to a docker
+// repository, returning its tag in the repository.
+func pushImage(ctx context.Context, tag, repo string) (string, error) {
+	fmt.Fprintf(os.Stderr, greenText(), fmt.Sprintf("\nUploading image to %s...", repo))
+	repoTag := path.Join(repo, tag)
+	cTag := exec.CommandContext(ctx, "docker", "tag", tag, repoTag)
+	cTag.Stdout = os.Stderr
+	cTag.Stderr = os.Stderr
+	if err := cTag.Run(); err != nil {
+		return "", err
+	}
+
+	cPush := exec.CommandContext(ctx, "docker", "push", repoTag)
+	cPush.Stdout = os.Stderr
+	cPush.Stderr = os.Stderr
+	if err := cPush.Run(); err != nil {
+		return "", err
+	}
+	return repoTag, nil
 }

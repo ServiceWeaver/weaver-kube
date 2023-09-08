@@ -94,20 +94,29 @@ type ListenerOptions struct {
 // KubeConfig stores the configuration information for one execution of a
 // Service Weaver application deployed using the Kube deployer.
 type KubeConfig struct {
-	// Image is the name of the container image that "weaver kube deploy"
-	// builds and uploads. For example, if Image is "docker.io/alanturing/foo",
-	// then "weaver kube deploy" will build a container called
-	// "docker.io/alanturing/foo" and upload it to Docker Hub.
+	// LocalTag is the build tag for the application container on the local
+	// machine.
 	//
-	// The format of Image depends on the registry being used. For example:
+	// If empty, the tag defaults to "<app_name>:<app_version>", where
+	// <app_version> is the unique version id of the application deployment.
+	LocalTag string
+
+	// Repo is the name of the repository the container should be uploaded to.
+	// For example, if set to "docker.io/alanturing/repo", "weaver kube deploy"
+	// will build the container locally, tag it with the appropriate Tag, and
+	// then push it to "docker.io/alanturing/repo".
 	//
-	// - Docker Hub: USERNAME/NAME or docker.io/USERNAME/NAME
-	// - Google Artifact Registry: LOCATION-docker.pkg.dev/PROJECT-ID/REPOSITORY/NAME
-	// - GitHub Container Registry: ghcr.io/NAMESPACE/NAME
+	// If empty, the container is built and tagged locally, but is not pushed
+	// to a repository.
 	//
-	// Note that "weaver kube deploy" will automatically append a unique tag to
-	// Image, so Image should not already contain a tag.
-	Image string
+	// Example repositories are:
+	//   - Docker Hub               :  docker.io/USERNAME/REPO_NAME
+	//   - Google Artifact Registry :  LOCATION-docker.pkg.dev/PROJECT-ID/REPO_NAME
+	//   - GitHub Container Registry: ghcr.io/NAMESPACE
+	//
+	// Note that the final image tag for the application container will
+	// be a concatenation of Repo and Tag, i.e., "Repo/Tag".
+	Repo string
 
 	// Namespace is the name of the Kubernetes namespace where the application
 	// should be deployed. If not specified, the application will be deployed in
@@ -316,7 +325,7 @@ func (r *replicaSetInfo) buildAutoscaler() (*autoscalingv2.HorizontalPodAutoscal
 	}, nil
 }
 
-// buildContainer builds a container for a replica set.
+// buildContainer builds a container specification for a replica set.
 func (r *replicaSetInfo) buildContainer() (corev1.Container, error) {
 	// Set the binary path in the deployment w.r.t. to the binary path in the
 	// docker image.
@@ -441,7 +450,7 @@ func GenerateKubeDeployment(image string, dep *protos.Deployment, cfg *KubeConfi
 	generated = append(generated, content...)
 
 	// Write the generated kube info into a file.
-	yamlFile := fmt.Sprintf("kube_%s.yaml", dep.Id)
+	yamlFile := filepath.Join(os.TempDir(), fmt.Sprintf("kube_%s.yaml", dep.Id))
 	f, err := os.OpenFile(yamlFile, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
 	if err != nil {
 		return err
@@ -451,7 +460,8 @@ func GenerateKubeDeployment(image string, dep *protos.Deployment, cfg *KubeConfi
 	if _, err := f.Write(generated); err != nil {
 		return fmt.Errorf("unable to write the kube deployment info: %w", err)
 	}
-	fmt.Fprintf(os.Stderr, greenText(), fmt.Sprintf("kube deployment information successfully generated in %s", yamlFile))
+	fmt.Fprintf(os.Stderr, greenText(), "kube deployment information successfully generated")
+	fmt.Println(yamlFile)
 	return nil
 }
 
@@ -661,6 +671,12 @@ func getComponents(dep *protos.Deployment, cfg *KubeConfig) (map[string]*Replica
 			components[dst] = &ReplicaSetConfig_Listeners{}
 		}
 	}
+
+	// Make sure weaver.Main is added.
+	// TODO(spetrovic): bin.ReadComponentGraph() should ideally return a list of
+	// nodes and edges, to avoid deployers having to support the Main-only case
+	// like we do here.
+	components["github.com/ServiceWeaver/weaver/Main"] = &ReplicaSetConfig_Listeners{}
 
 	// Get listeners.
 	listenersToComponent, err := bin.ReadListeners(dep.App.Binary)
