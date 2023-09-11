@@ -99,7 +99,7 @@ type KubeConfig struct {
 	//
 	// If empty, the tag defaults to "<app_name>:<app_version>", where
 	// <app_version> is the unique version id of the application deployment.
-	LocalTag string
+	LocalTag string `toml:"local_tag"`
 
 	// Repo is the name of the repository the container should be uploaded to.
 	// For example, if set to "docker.io/alanturing/repo", "weaver kube deploy"
