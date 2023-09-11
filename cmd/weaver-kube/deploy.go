@@ -49,30 +49,34 @@ Flags:
   -h, --help	Print this help message.
 
 Container Image Names:
-  "weaver kube deploy" builds and uploads a container image. You need to
-  specify the name of the container using the "image" field inside the "kube"
-  section of the config file. For example, consider the following config file:
+  "weaver kube deploy" builds a container image locally, and optionally uploads
+  it to a container repository. The repository can be specified using the
+  "repo" field inside the "kube" section of the config file. For example,
+  consider the following config file:
 
       [serviceweaver]
       binary = "./foo"
 
       [kube]
-      image = "docker.io/my_docker_hub_username/foo"
+      tag  = "foo/foo:0.0.1"
+      repo = "docker.io/my_docker_hub_username/my_repo"
 
-  Using this config file, "weaver kube deploy" will build a container called
-  "docker.io/my_docker_hub_username/foo" and upload it to Docker Hub. The
-  format of the "image" field depends on the registry being used. Some
-  examples:
+  Using this config file, "weaver kube deploy" will build a container
+  with a local build tag [1] "foo/foo:0.0.1", and upload it to the
+  "docker.io/my_docker_hub_username/my_repo" repository. If the "tag" is not
+  specified, it defaults to "<app_name>:<app_version>. If the "repo"
+  is not specified, the container is not uploaded and must be pushed
+  manually to the Kubernetes environments.
+  
+  Example repositories are:
+      - Docker Hub:                docker.io/USERNAME/REPO_NAME
+      - Google Artifact Registry:  LOCATION-docker.pkg.dev/PROJECT-ID/REPO_NAME
+      - GitHub Container Registry: ghcr.io/NAMESPACE
 
-      - Docker Hub: USERNAME/NAME or docker.io/USERNAME/NAME
-      - Google Artifact Registry: LOCATION-docker.pkg.dev/PROJECT-ID/REPOSITORY/NAME
-      - GitHub Container Registry: ghcr.io/NAMESPACE/NAME
-
-  "weaver kube deploy" will automatically append a tag to the image name, so
-  the "image" field should not contain a tag.
-
-  Note that for "weaver kube deploy" to work correctly, you must be
-  authenticated with the provided registry (e.g., by running "docker login".)`,
+  Note that the final image tag for the application container will
+  be a concatenation of repo and tag fields, i.e., "repo/tag".
+  
+  [1]: https://docs.docker.com/engine/reference/commandline/tag/`,
 		Flags: flags,
 		Fn:    deploy,
 	}
@@ -108,8 +112,8 @@ func deploy(ctx context.Context, args []string) error {
 	if err := swruntime.ParseConfigSection(configKey, shortConfigKey, app.Sections, config); err != nil {
 		return fmt.Errorf("parse kube config: %w", err)
 	}
-	if config.Image == "" {
-		return fmt.Errorf("No image name provided in config file. See `weaver kube deploy --help` for details")
+	if config.Repo == "" {
+		fmt.Fprintln(os.Stderr, "No container repo specified in the config file. The container image will only be accessible locally. See `weaver kube deploy --help` for details.")
 	}
 	if config.Namespace == "" {
 		config.Namespace = "default"
@@ -136,8 +140,8 @@ func deploy(ctx context.Context, args []string) error {
 		App: app,
 	}
 
-	// Build the docker image for the deployment, and upload it to docker hub.
-	image, err := impl.BuildAndUploadDockerImage(ctx, dep, config.Image, *runInDevMode)
+	// Build the docker image for the deployment.
+	image, err := impl.BuildAndUploadDockerImage(ctx, dep, config.LocalTag, config.Repo, *runInDevMode)
 	if err != nil {
 		return err
 	}

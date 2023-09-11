@@ -18,5 +18,5 @@ const (
 	// weaver-kube module version (Major.Minor.Patch).
 	Major = 0
 	Minor = 20
-	Patch = 0
+	Patch = 1
 )
