@@ -55,7 +55,7 @@ const (
 
 var (
 	// Start value for ports used by the public and private listeners.
-	externalPort = 20000
+	externalPort int32 = 20000
 
 	// Resource allocation units for "cpu" and "memory" resources.
 	//
@@ -89,6 +89,11 @@ type ListenerOptions struct {
 	// from the public internet. If false, the listener is configured only
 	// for cluster-internal access.
 	Public bool
+
+	// If specified, the port inside the container on which the listener
+	// is reachable. If zero or not specified, the first available port
+	// is used.
+	Port int32
 }
 
 // KubeConfig stores the configuration information for one execution of a
@@ -341,6 +346,22 @@ func (r *replicaSetInfo) buildContainer() (corev1.Container, error) {
 	if err != nil {
 		return corev1.Container{}, err
 	}
+
+	// Always expose the metrics port from the container, so it can be
+	// discoverable for scraping by Prometheus.
+	ports := []corev1.ContainerPort{
+		{Name: "prometheus", ContainerPort: defaultMetricsPort},
+	}
+	// Expose all of the listener ports.
+	for _, ls := range r.components {
+		for _, l := range ls.Listeners {
+			ports = append(ports, corev1.ContainerPort{
+				Name:          l.Name,
+				ContainerPort: l.ExternalPort,
+			})
+		}
+	}
+
 	return corev1.Container{
 		Name:            appContainerName,
 		Image:           r.image,
@@ -365,10 +386,7 @@ func (r *replicaSetInfo) buildContainer() (corev1.Container, error) {
 			// attach autoscalers to all of our containers, so the extra-usage
 			// should be only for a short period of time.
 		},
-
-		// Expose the metrics port from the container, so it can be discoverable for
-		// scraping by Prometheus.
-		Ports: []corev1.ContainerPort{{ContainerPort: defaultMetricsPort}},
+		Ports: ports,
 
 		// Enabling TTY and Stdin allows the user to run a shell inside the container,
 		// for debugging.
@@ -693,13 +711,20 @@ func getComponents(dep *protos.Deployment, cfg *KubeConfig) (map[string]*Replica
 			if opts := cfg.Listeners[lis]; opts != nil && opts.Public {
 				public = true
 			}
+			var port int32
+			if opts := cfg.Listeners[lis]; opts != nil && opts.Port != 0 {
+				port = opts.Port
+			} else {
+				// Pick an unused port.
+				port = externalPort
+				externalPort++
+			}
 			components[c.Component].Listeners = append(components[c.Component].Listeners,
 				&ReplicaSetConfig_Listener{
 					Name:         lis,
-					ExternalPort: int32(externalPort),
+					ExternalPort: port,
 					IsPublic:     public,
 				})
-			externalPort++
 		}
 	}
 	return components, nil
