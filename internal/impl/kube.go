@@ -128,6 +128,13 @@ type KubeConfig struct {
 	// the default namespace.
 	Namespace string
 
+	// If true, application listeners will use the underlying nodes' network.
+	// This behavior is generally discouraged, but it may be useful when running
+	// the application in a minikube environment, where using the underlying
+	// nodes' network may make it easier to access the listeners directly from
+	// the host machine.
+	UseHostNetwork bool `toml:"use_host_network"`
+
 	// Options for the application listeners, keyed by listener name.
 	// If a listener isn't specified in the map, default options will be used.
 	Listeners map[string]*ListenerOptions
@@ -183,7 +190,7 @@ func (r *replicaSetInfo) deploymentName() string {
 // TODO(rgrandl): test to see if it works with an app where a component foo is
 // collocated with main, and a component bar that is not collocated with main
 // calls foo.
-func (r *replicaSetInfo) buildDeployment() (*appsv1.Deployment, error) {
+func (r *replicaSetInfo) buildDeployment(cfg *KubeConfig) (*appsv1.Deployment, error) {
 	matchLabels := map[string]string{}
 	podLabels := map[string]string{
 		"appName": r.dep.App.Name,
@@ -200,6 +207,10 @@ func (r *replicaSetInfo) buildDeployment() (*appsv1.Deployment, error) {
 		podLabels["globalName"] = r.globalName()
 	} else {
 		matchLabels["depName"] = r.deploymentName()
+	}
+	dnsPolicy := corev1.DNSDefault
+	if cfg.UseHostNetwork {
+		dnsPolicy = corev1.DNSClusterFirstWithHostNet
 	}
 
 	container, err := r.buildContainer()
@@ -225,7 +236,9 @@ func (r *replicaSetInfo) buildDeployment() (*appsv1.Deployment, error) {
 					Namespace: r.namespace,
 				},
 				Spec: corev1.PodSpec{
-					Containers: []corev1.Container{container},
+					Containers:  []corev1.Container{container},
+					DNSPolicy:   dnsPolicy,
+					HostNetwork: cfg.UseHostNetwork,
 				},
 			},
 			Strategy: appsv1.DeploymentStrategy{
@@ -454,7 +467,7 @@ func GenerateKubeDeployment(image string, dep *protos.Deployment, cfg *KubeConfi
 	}
 
 	// Generate the app deployment info.
-	content, err = generateAppDeployment(replicaSets)
+	content, err = generateAppDeployment(replicaSets, cfg)
 	if err != nil {
 		return fmt.Errorf("unable to create kube app deployment: %w", err)
 	}
@@ -557,14 +570,14 @@ func generateRolesAndBindings(namespace string) ([]byte, error) {
 
 // generateAppDeployment generates the kubernetes deployment and service
 // information for a given app deployment.
-func generateAppDeployment(replicaSets map[string]*replicaSetInfo) ([]byte, error) {
+func generateAppDeployment(replicaSets map[string]*replicaSetInfo, cfg *KubeConfig) ([]byte, error) {
 	var generated []byte
 
 	// For each replica set, build a deployment and a service. If a replica set
 	// has any listeners, build a service for each listener.
 	for _, rs := range replicaSets {
 		// Build a deployment.
-		d, err := rs.buildDeployment()
+		d, err := rs.buildDeployment(cfg)
 		if err != nil {
 			return nil, fmt.Errorf("unable to create kube deployment for replica set %s: %w", rs.name, err)
 		}
