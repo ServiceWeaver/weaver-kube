@@ -77,7 +77,7 @@ jobs:
 
     - name: Build the docker image and push
       run: |
-        WEAVER_YAML=$(./cmd/weaver-kube/weaver-kube deploy --runInDevMode ${{ env.CONFIG_FILE }})
+        WEAVER_YAML=$(./cmd/weaver-kube/weaver-kube deploy ${{ env.CONFIG_FILE }})
         echo "Generated YAML file:" $WEAVER_YAML
         echo "WEAVER_YAML=$WEAVER_YAML" >> $GITHUB_ENV
     

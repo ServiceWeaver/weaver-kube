@@ -15,6 +15,7 @@
 package impl
 
 import (
+	"bufio"
 	"context"
 	"fmt"
 	"os"
@@ -25,7 +26,6 @@ import (
 	"text/template"
 	"time"
 
-	"github.com/ServiceWeaver/weaver-kube/internal/version"
 	"github.com/ServiceWeaver/weaver/runtime/protos"
 	"github.com/google/uuid"
 )
@@ -59,9 +59,9 @@ type buildSpec struct {
 // BuildAndUploadDockerImage builds a docker image and uploads it to a remote
 // repo, if one is specified. It returns the docker image tag that should
 // be used in the application containers.
-func BuildAndUploadDockerImage(ctx context.Context, dep *protos.Deployment, buildTag, dockerRepo string, runInDevMode bool) (string, error) {
+func BuildAndUploadDockerImage(ctx context.Context, dep *protos.Deployment, buildTag, dockerRepo string) (string, error) {
 	// Create the build specifications.
-	spec, err := dockerBuildSpec(dep, buildTag, runInDevMode)
+	spec, err := dockerBuildSpec(dep, buildTag)
 	if err != nil {
 		return "", fmt.Errorf("unable to build image spec: %w", err)
 	}
@@ -82,32 +82,48 @@ func BuildAndUploadDockerImage(ctx context.Context, dep *protos.Deployment, buil
 }
 
 // dockerBuildSpec creates a build specification for an app deployment.
-func dockerBuildSpec(dep *protos.Deployment, buildTag string, runInDevMode bool) (*buildSpec, error) {
-	files := []string{dep.App.Binary}
-	toolVersion := fmt.Sprintf("v%d.%d.%d", version.Major, version.Minor, version.Patch)
-	goInstall := []string{
-		"github.com/ServiceWeaver/weaver-kube/cmd/weaver-kube@" + toolVersion,
+func dockerBuildSpec(dep *protos.Deployment, buildTag string) (*buildSpec, error) {
+	// Figure out which tool binary will run inside the container.
+	toolVersion, toolIsDev, err := ToolVersion()
+	if err != nil {
+		return nil, err
 	}
-	if buildTag == "" {
-		buildTag = fmt.Sprintf("%s:%s", dep.App.Name, dep.Id[:8])
-	}
-
-	// If we run the kube deployer in the development mode, we should copy the
-	// local kube binary to the image instead.
-	if runInDevMode && runtime.GOOS == "linux" && runtime.GOARCH == "amd64" {
-		// Use the running weaver-kube tool binary.
+	toCopy := []string{dep.App.Binary}
+	var toInstall []string
+	if runtime.GOOS == "linux" && runtime.GOARCH == "amd64" {
+		// The running tool binary can run inside the container: copy it.
 		toolBinPath, err := os.Executable()
 		if err != nil {
 			return nil, err
 		}
-		files = append(files, toolBinPath)
-		goInstall = []string{}
+		toCopy = append(toCopy, toolBinPath)
+	} else if toolIsDev {
+		// Devel tool binary that's not linux/amd64: prompt the user.
+		scanner := bufio.NewScanner(os.Stdin)
+		fmt.Print(
+			`The running weaver-kube binary hasn't been cross-compiled for linux/amd64 and
+cannot run inside the container. Instead, the latest weaver-kube binary will be
+downloaded and installed in the container. Do you want to proceed? [Y/n] `)
+		scanner.Scan()
+		text := scanner.Text()
+		if text != "" && text != "y" && text != "Y" {
+			return nil, fmt.Errorf("user bailed out")
+		}
+		toInstall = append(toInstall, "github.com/ServiceWeaver/weaver-kube/cmd/weaver-kube@latest")
+	} else {
+		// Released tool binary that's not compiled to linux/amd64. Re-install
+		// it inside the container.
+		toInstall = append(toInstall, "github.com/ServiceWeaver/weaver-kube/cmd/weaver-kube@"+toolVersion)
+	}
+
+	if buildTag == "" {
+		buildTag = fmt.Sprintf("%s:%s", dep.App.Name, dep.Id[:8])
 	}
 
 	return &buildSpec{
 		tag:       buildTag,
-		files:     files,
-		goInstall: goInstall,
+		files:     toCopy,
+		goInstall: toInstall,
 	}, nil
 }
 

@@ -36,9 +36,7 @@ const (
 )
 
 var (
-	flags        = flag.NewFlagSet("deploy", flag.ContinueOnError)
-	runInDevMode = flags.Bool("runInDevMode", false, "Whether deploy in development mode.")
-
+	flags     = flag.NewFlagSet("deploy", flag.ContinueOnError)
 	deployCmd = tool.Command{
 		Name:        "deploy",
 		Description: "Deploy a Service Weaver app",
@@ -141,7 +139,7 @@ func deploy(ctx context.Context, args []string) error {
 	}
 
 	// Build the docker image for the deployment.
-	image, err := impl.BuildAndUploadDockerImage(ctx, dep, config.LocalTag, config.Repo, *runInDevMode)
+	image, err := impl.BuildAndUploadDockerImage(ctx, dep, config.LocalTag, config.Repo)
 	if err != nil {
 		return err
 	}
