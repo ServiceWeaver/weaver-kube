@@ -23,6 +23,7 @@ import (
 
 	"github.com/ServiceWeaver/weaver-kube/internal/proto"
 	"github.com/ServiceWeaver/weaver/runtime/bin"
+	"github.com/ServiceWeaver/weaver/runtime/graph"
 	"github.com/ServiceWeaver/weaver/runtime/protos"
 	"golang.org/x/exp/maps"
 	appsv1 "k8s.io/api/apps/v1"
@@ -687,37 +688,25 @@ func replicaSet(component string, dep *protos.Deployment) string {
 
 // getComponents returns the list of components from a binary.
 func getComponents(dep *protos.Deployment, cfg *KubeConfig) (map[string]*ReplicaSetConfig_Listeners, error) {
-	// Get components.
-	components := map[string]*ReplicaSetConfig_Listeners{}
-	callGraph, err := bin.ReadComponentGraph(dep.App.Binary)
+	// Listeners, keyed by the component that owns them.
+	listeners := map[string]*ReplicaSetConfig_Listeners{}
+	components, g, err := bin.ReadComponentGraph(dep.App.Binary)
 	if err != nil {
 		return nil, fmt.Errorf("unable to retrieve the call graph for binary %s: %w", dep.App.Binary, err)
 	}
-	for _, edge := range callGraph {
-		src, dst := edge[0], edge[1]
-		if _, found := components[src]; !found {
-			components[src] = &ReplicaSetConfig_Listeners{}
-		}
-		if _, found := components[dst]; !found {
-			components[dst] = &ReplicaSetConfig_Listeners{}
-		}
-	}
-
-	// Make sure weaver.Main is added.
-	// TODO(spetrovic): bin.ReadComponentGraph() should ideally return a list of
-	// nodes and edges, to avoid deployers having to support the Main-only case
-	// like we do here.
-	components["github.com/ServiceWeaver/weaver/Main"] = &ReplicaSetConfig_Listeners{}
+	g.PerNode(func(n graph.Node) {
+		listeners[components[n]] = &ReplicaSetConfig_Listeners{}
+	})
 
 	// Get listeners.
-	listenersToComponent, err := bin.ReadListeners(dep.App.Binary)
+	ls, err := bin.ReadListeners(dep.App.Binary)
 	if err != nil {
 		return nil, fmt.Errorf("unable to retrieve the listeners for binary %s: %w", dep.App.Binary, err)
 	}
 
-	for _, c := range listenersToComponent {
-		if _, found := components[c.Component]; !found {
-			return nil, fmt.Errorf("listeners mapped to unknown component: %s", c.Component)
+	for _, c := range ls {
+		if _, found := listeners[c.Component]; !found {
+			return nil, fmt.Errorf("listeners %v mapped to unknown component: %s", c.Listeners, c.Component)
 		}
 		for _, lis := range c.Listeners {
 			public := false
@@ -732,7 +721,7 @@ func getComponents(dep *protos.Deployment, cfg *KubeConfig) (map[string]*Replica
 				port = externalPort
 				externalPort++
 			}
-			components[c.Component].Listeners = append(components[c.Component].Listeners,
+			listeners[c.Component].Listeners = append(listeners[c.Component].Listeners,
 				&ReplicaSetConfig_Listener{
 					Name:         lis,
 					ExternalPort: port,
@@ -740,5 +729,5 @@ func getComponents(dep *protos.Deployment, cfg *KubeConfig) (map[string]*Replica
 				})
 		}
 	}
-	return components, nil
+	return listeners, nil
 }

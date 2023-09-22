@@ -3,7 +3,7 @@ module github.com/ServiceWeaver/weaver-kube
 go 1.21
 
 require (
-	github.com/ServiceWeaver/weaver v0.21.3-0.20230918223424-a8116a766c3a
+	github.com/ServiceWeaver/weaver v0.21.3-0.20230922172232-acf4cb9d1384
 	github.com/google/uuid v1.3.0
 	go.opentelemetry.io/otel v1.16.0
 	go.opentelemetry.io/otel/exporters/jaeger v1.16.0
