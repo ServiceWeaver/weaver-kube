@@ -36,7 +36,6 @@ import (
 	"github.com/google/uuid"
 	"go.opentelemetry.io/otel/exporters/jaeger"
 	"go.opentelemetry.io/otel/sdk/trace"
-	"golang.org/x/exp/maps"
 	v1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/watch"
@@ -93,7 +92,7 @@ func RunBabysitter(ctx context.Context) error {
 		DeploymentId:    cfg.Deployment.Id,
 		Id:              uuid.New().String(),
 		Sections:        cfg.Deployment.App.Sections,
-		RunMain:         cfg.ReplicaSet == runtime.Main,
+		RunMain:         cfg.Name == runtime.Main,
 		InternalAddress: fmt.Sprintf("%s:%d", host, cfg.InternalPort),
 	}
 	e, err := envelope.NewEnvelope(ctx, wlet, cfg.Deployment.App)
@@ -167,7 +166,11 @@ func RunBabysitter(ctx context.Context) error {
 	}
 
 	// Inform the weavelet of the components it should host.
-	if err := b.envelope.UpdateComponents(maps.Keys(cfg.ComponentsToStart)); err != nil {
+	components := make([]string, len(cfg.Components))
+	for i, c := range cfg.Components {
+		components[i] = c.Name
+	}
+	if err := b.envelope.UpdateComponents(components); err != nil {
 		return err
 	}
 
@@ -218,7 +221,7 @@ func (b *babysitter) watchPods(ctx context.Context, component string) error {
 	b.mu.Unlock()
 
 	// Watch the pods running the requested component.
-	rs := replicaSet(component, b.cfg.Deployment)
+	rs := replicaSetName(component, b.cfg.Deployment)
 	name := name{b.cfg.Deployment.App.Name, rs, b.cfg.Deployment.Id[:8]}.DNSLabel()
 	opts := metav1.ListOptions{LabelSelector: fmt.Sprintf("depName=%s", name)}
 	watcher, err := b.clientset.CoreV1().Pods(b.cfg.Namespace).Watch(ctx, opts)
@@ -277,12 +280,11 @@ func (b *babysitter) watchPods(ctx context.Context, component string) error {
 }
 
 // GetListenerAddress implements the envelope.EnvelopeHandler interface.
-func (b *babysitter) GetListenerAddress(_ context.Context, request *protos.GetListenerAddressRequest) (
-	*protos.GetListenerAddressReply, error) {
-	// The external listeners are prestarted, hence it returns the address on
-	// which the requested listener service is available.
-	for _, listeners := range maps.Values(b.cfg.ComponentsToStart) {
-		for _, lis := range listeners.Listeners {
+func (b *babysitter) GetListenerAddress(_ context.Context, request *protos.GetListenerAddressRequest) (*protos.GetListenerAddressReply, error) {
+	// The external listeners are prestarted, hence we return the address of
+	// the Kubernetes Service.
+	for _, components := range b.cfg.Components {
+		for _, lis := range components.Listeners {
 			if lis.Name == request.Name {
 				addr := fmt.Sprintf(":%d", lis.ExternalPort)
 				return &protos.GetListenerAddressReply{Address: addr}, nil
@@ -349,4 +351,17 @@ func serveHTTP(ctx context.Context, lis net.Listener, handler http.Handler) erro
 	case <-ctx.Done():
 		return server.Shutdown(ctx)
 	}
+}
+
+// replicaSetName returns the name of the replica set that hosts a given
+// component.
+func replicaSetName(component string, dep *protos.Deployment) string {
+	for _, group := range dep.App.Colocate {
+		for _, c := range group.Components {
+			if c == component {
+				return group.Components[0]
+			}
+		}
+	}
+	return component
 }

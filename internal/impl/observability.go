@@ -150,9 +150,9 @@ const (
 //go:embed dashboard.txt
 var dashboardContent string
 
-// generateObservabilityConfigs generates Kubernetes configurations for exporting
+// generateObservabilityYAMLs generates Kubernetes YAMLs for exporting
 // applications' metrics, logs, and traces.
-func generateObservabilityConfigs(dep *protos.Deployment, cfg *KubeConfig) ([]byte, error) {
+func generateObservabilityYAMLs(dep *protos.Deployment, cfg *KubeConfig) ([]byte, error) {
 	configs, err := generateConfigsToExportTraces(dep, cfg)
 	if err != nil {
 		return nil, fmt.Errorf("unable to create kube configs to export traces: %w", err)
