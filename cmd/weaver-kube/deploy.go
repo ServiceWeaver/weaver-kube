@@ -150,7 +150,7 @@ func deploy(ctx context.Context, args []string) error {
 	}
 
 	// Generate the kube deployment information.
-	return impl.GenerateKubeDeployment(image, dep, config)
+	return impl.GenerateYAMLs(image, dep, config)
 }
 
 // checkVersionCompatibility checks that the tool binary is compatible with

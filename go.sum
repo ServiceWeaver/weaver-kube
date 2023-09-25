@@ -39,8 +39,8 @@ github.com/DataDog/hyperloglog v0.0.0-20220804205443-1806d9b66146 h1:S5WsRc58vIe
 github.com/DataDog/hyperloglog v0.0.0-20220804205443-1806d9b66146/go.mod h1:hFPkswc42pKhRbeKDKXy05mRi7J1kJ2vMNbvd9erH0M=
 github.com/DataDog/mmh3 v0.0.0-20210722141835-012dc69a9e49 h1:EbzDX8HPk5uE2FsJYxD74QmMw0/3CqSKhEr6teh0ncQ=
 github.com/DataDog/mmh3 v0.0.0-20210722141835-012dc69a9e49/go.mod h1:SvsjzyJlSg0rKsqYgdcFxeEVflx3ZNAyFfkUHP0TxXg=
-github.com/ServiceWeaver/weaver v0.21.3-0.20230922172232-acf4cb9d1384 h1:V+Kw3VlFFEkdDC+Two7jJ8ubHUKDzIMJoMfRQpN4MjY=
-github.com/ServiceWeaver/weaver v0.21.3-0.20230922172232-acf4cb9d1384/go.mod h1:fnM1hRM9VlssXVTWiWizSMJ1wclydVfzWZGHusHih90=
+github.com/ServiceWeaver/weaver v0.21.3-0.20230925211757-1dba46274053 h1:4oW7iasG2rT6IpEqa2kCiCETsHf1KiNM1UgxeE0r8eQ=
+github.com/ServiceWeaver/weaver v0.21.3-0.20230925211757-1dba46274053/go.mod h1:fnM1hRM9VlssXVTWiWizSMJ1wclydVfzWZGHusHih90=
 github.com/antlr/antlr4/runtime/Go/antlr/v4 v4.0.0-20230305170008-8188dc5388df h1:7RFfzj4SSt6nnvCPbCqijJi1nWCd+TqAT3bYCStRC18=
 github.com/antlr/antlr4/runtime/Go/antlr/v4 v4.0.0-20230305170008-8188dc5388df/go.mod h1:pSwJ0fSY5KhvocuWSx4fz3BA8OrA1bQn+K1Eli3BRwM=
 github.com/census-instrumentation/opencensus-proto v0.2.1/go.mod h1:f6KPmirojxKA12rnyqOA5BBL4O983OfeGPqjHWSTneU=

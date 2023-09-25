@@ -66,22 +66,15 @@ var (
 	memoryUnit = resource.MustParse("128Mi")
 )
 
-// replicaSetInfo contains information associated with a replica set.
-type replicaSetInfo struct {
-	name      string             // name of the replica set
-	image     string             // name of the image to be deployed
-	namespace string             // namespace where the replica set will be deployed
-	dep       *protos.Deployment // deployment info
-
-	// set of the components hosted by the replica set and their listeners,
-	// keyed by component name.
-	components map[string]*ReplicaSetConfig_Listeners
-
-	// port used by the weavelets that are part of the replica set to listen on
-	// for internal traffic.
-	internalPort int
-
-	traceServiceURL string // trace exporter URL
+// replicaSet contains information about a replica set.
+type replicaSet struct {
+	name            string                        // name of the replica set
+	components      []*ReplicaSetConfig_Component // components hosted by replica set
+	image           string                        // name of the image to be deployed
+	namespace       string                        // namespace of the replica set
+	dep             *protos.Deployment            // deployment info
+	internalPort    int                           // internal weavelet port
+	traceServiceURL string                        // trace exporter URL
 }
 
 // ListenerOptions stores configuration options for a listener.
@@ -177,12 +170,12 @@ type KubeConfig struct {
 }
 
 // globalName returns an unique name that persists across app versions.
-func (r *replicaSetInfo) globalName() string {
+func (r *replicaSet) globalName() string {
 	return name{r.dep.App.Name, r.name}.DNSLabel()
 }
 
 // deploymentName returns a name that is version specific.
-func (r *replicaSetInfo) deploymentName() string {
+func (r *replicaSet) deploymentName() string {
 	return name{r.dep.App.Name, r.name, r.dep.Id[:8]}.DNSLabel()
 }
 
@@ -191,7 +184,7 @@ func (r *replicaSetInfo) deploymentName() string {
 // TODO(rgrandl): test to see if it works with an app where a component foo is
 // collocated with main, and a component bar that is not collocated with main
 // calls foo.
-func (r *replicaSetInfo) buildDeployment(cfg *KubeConfig) (*appsv1.Deployment, error) {
+func (r *replicaSet) buildDeployment(cfg *KubeConfig) (*appsv1.Deployment, error) {
 	matchLabels := map[string]string{}
 	podLabels := map[string]string{
 		"appName": r.dep.App.Name,
@@ -258,7 +251,7 @@ func (r *replicaSetInfo) buildDeployment(cfg *KubeConfig) (*appsv1.Deployment, e
 // Note that for public listeners, we generate a Load Balancer service because
 // it has to be reachable from the outside; for internal listeners, we generate
 // a ClusterIP service, reachable only from internal Service Weaver services.
-func (r *replicaSetInfo) buildListenerService(lis *ReplicaSetConfig_Listener) (*corev1.Service, error) {
+func (r *replicaSet) buildListenerService(lis *ReplicaSetConfig_Listener) (*corev1.Service, error) {
 	// Unique name that persists across app versions.
 	// TODO(rgrandl): Specify whether the listener is public in the name.
 	globalLisName := name{r.dep.App.Name, "lis", lis.Name}.DNSLabel()
@@ -299,7 +292,7 @@ func (r *replicaSetInfo) buildListenerService(lis *ReplicaSetConfig_Listener) (*
 }
 
 // buildAutoscaler generates a kubernetes horizontal pod autoscaler for a replica set.
-func (r *replicaSetInfo) buildAutoscaler() (*autoscalingv2.HorizontalPodAutoscaler, error) {
+func (r *replicaSet) buildAutoscaler() (*autoscalingv2.HorizontalPodAutoscaler, error) {
 	// Per deployment name that is app version specific.
 	aname := name{r.dep.App.Name, "hpa", r.name, r.dep.Id[:8]}.DNSLabel()
 
@@ -345,17 +338,17 @@ func (r *replicaSetInfo) buildAutoscaler() (*autoscalingv2.HorizontalPodAutoscal
 }
 
 // buildContainer builds a container specification for a replica set.
-func (r *replicaSetInfo) buildContainer() (corev1.Container, error) {
+func (r *replicaSet) buildContainer() (corev1.Container, error) {
 	// Set the binary path in the deployment w.r.t. to the binary path in the
 	// docker image.
 	r.dep.App.Binary = fmt.Sprintf("/weaver/%s", filepath.Base(r.dep.App.Binary))
 	kubeCfgStr, err := proto.ToEnv(&ReplicaSetConfig{
-		Namespace:         r.namespace,
-		Deployment:        r.dep,
-		ReplicaSet:        r.name,
-		ComponentsToStart: r.components,
-		InternalPort:      int32(r.internalPort),
-		TraceServiceUrl:   r.traceServiceURL,
+		Namespace:       r.namespace,
+		Name:            r.name,
+		Deployment:      r.dep,
+		InternalPort:    int32(r.internalPort),
+		TraceServiceUrl: r.traceServiceURL,
+		Components:      r.components,
 	})
 	if err != nil {
 		return corev1.Container{}, err
@@ -410,7 +403,7 @@ func (r *replicaSetInfo) buildContainer() (corev1.Container, error) {
 }
 
 // hasListeners returns whether a given replica set exports any listeners.
-func (r *replicaSetInfo) hasListeners() bool {
+func (r *replicaSet) hasListeners() bool {
 	for _, listeners := range r.components {
 		if listeners.Listeners != nil {
 			return true
@@ -419,38 +412,34 @@ func (r *replicaSetInfo) hasListeners() bool {
 	return false
 }
 
-// GenerateKubeDeployment generates the kubernetes deployment and service
-// information for a given app deployment.
+// GenerateYAMLs generates Kubernetes YAML configurations for a given
+// application version.
 //
-// Note that for each application, we generate the following Kubernetes topology:
+// The following Kubernetes YAML configurations will be generated:
 //
-//   - for each replica set that has at least a listener, we generate a deployment
-//     whose name is persistent across new app versions rollouts. Note that in
-//     general this should only be the replica set that contains the main component.
-//     We do this because by default we rely on RollingUpdate as a deployment
-//     strategy to rollout new versions of the app. RollingUpdate will update the
-//     existing pods for the replica set with the new version one by one, hence
-//     the new application version is being deployed.
-//     For example, let's assume that we have an app v1 with 2 replica sets main
-//     and foo. main is the replica set that contains the public listener, and it
-//     has 2 replicas. Next, we deploy the version v2 of the app. v2 will be
-//     rolled out as follows:
+//   - For replica sets that don't host any listeners, a Kubernetes Deployment
+//     YAML with a unique name.
+//
+//   - For replica sets that do host a network listener, a Kubernetes Deployment
+//     YAML with a stable name, i.e., a name that persists across application
+//     versions. This crossed-version shared naming will be used to gradually
+//     roll out a new application version.
+//
+//     For example, let's assume that we have an app v1 with two replica sets:
+//     `main` and `foo“, with `main` hosting a network listener. When we deploy
+//     v2 of the app, it will be rolled out as follows:
 //
 //     [main v1] [main v1]     [main v1] [main v2]     [main v2] [main v2]
 //     |            |          |         |             |         |
 //     v            |       => v         v         =>  |         v
 //     [foo v1] <---|          [foo v1]  [foo v2]      |-------> [foo v2]
 //
-//   - for all the replica sets, we create a per app version service so components
-//     within an app version can communicate with each other.
+//   - For network listeners, a Kubernetes Service with a stable name, i.e.,
+//     a name that persists across application versions.
 //
-//   - for all the listeners we create a load balancer or a cluster IP with an
-//     unique name that is persistent across new app version rollouts.
-//
-//   - if Prometheus/Jaeger are enabled, we deploy corresponding services using
-//     unique names as well s.t., we don't rollout new instances of Prometheus/Jaeger,
-//     when we rollout new versions of the app.
-func GenerateKubeDeployment(image string, dep *protos.Deployment, cfg *KubeConfig) error {
+//   - If observability services are enabled (e.g., Prometheus, Jaeger), a
+//     Kubernetes Deployment and/or a Service for each observability service.
+func GenerateYAMLs(image string, dep *protos.Deployment, cfg *KubeConfig) error {
 	fmt.Fprintf(os.Stderr, greenText(), "\nGenerating kube deployment info ...")
 
 	// Generate roles and role bindings.
@@ -461,21 +450,15 @@ func GenerateKubeDeployment(image string, dep *protos.Deployment, cfg *KubeConfi
 	}
 	generated = append(generated, content...)
 
-	// Generate the kubernetes replica sets for the deployment.
-	replicaSets, err := buildReplicaSetSpecs(dep, image, cfg)
-	if err != nil {
-		return fmt.Errorf("unable to create replica sets: %w", err)
-	}
-
-	// Generate the app deployment info.
-	content, err = generateAppDeployment(replicaSets, cfg)
+	// Generate core YAMLs (deployments, services, autoscalers).
+	content, err = generateCoreYAMLs(dep, cfg, image)
 	if err != nil {
 		return fmt.Errorf("unable to create kube app deployment: %w", err)
 	}
 	generated = append(generated, content...)
 
 	// Generate deployment info needed to get insights into the application.
-	content, err = generateObservabilityConfigs(dep, cfg)
+	content, err = generateObservabilityYAMLs(dep, cfg)
 	if err != nil {
 		return fmt.Errorf("unable to create configuration information: %w", err)
 	}
@@ -569,14 +552,22 @@ func generateRolesAndBindings(namespace string) ([]byte, error) {
 	return b.Bytes(), nil
 }
 
-// generateAppDeployment generates the kubernetes deployment and service
-// information for a given app deployment.
-func generateAppDeployment(replicaSets map[string]*replicaSetInfo, cfg *KubeConfig) ([]byte, error) {
-	var generated []byte
+// generateCoreYAMLs generates the core YAMLs for the given deployment.
+func generateCoreYAMLs(dep *protos.Deployment, cfg *KubeConfig, image string) ([]byte, error) {
+	// Generate the kubernetes replica sets for the deployment, along with
+	// their communication graph.
+	replicaSets, rg, err := buildReplicaSets(dep, image, cfg)
+	if err != nil {
+		return nil, fmt.Errorf("unable to create replica sets: %w", err)
+	}
 
-	// For each replica set, build a deployment and a service. If a replica set
-	// has any listeners, build a service for each listener.
-	for _, rs := range replicaSets {
+	// For each replica set, build a deployment and an autoscaler. If a replica
+	// set has any listeners, build a service for each listener. We traverse
+	// the graph in a deterministic order, to achieve a stable YAML file.
+	var generated []byte
+	for _, n := range graph.ReversePostOrder(rg) {
+		rs := replicaSets[n]
+
 		// Build a deployment.
 		d, err := rs.buildDeployment(cfg)
 		if err != nil {
@@ -627,18 +618,10 @@ func generateAppDeployment(replicaSets map[string]*replicaSetInfo, cfg *KubeConf
 	return generated, nil
 }
 
-// buildReplicaSetSpecs returns the replica sets specs for the deployment dep
-// keyed by the replica set.
-func buildReplicaSetSpecs(dep *protos.Deployment, image string, cfg *KubeConfig) (
-	map[string]*replicaSetInfo, error) {
-	rsets := map[string]*replicaSetInfo{}
-
-	// Retrieve the components from the binary.
-	components, err := getComponents(dep, cfg)
-	if err != nil {
-		return nil, err
-	}
-
+// buildReplicaSets returns the replica sets that will be used for the
+// given deployment, along with the communication graph used between those
+// replica sets.
+func buildReplicaSets(dep *protos.Deployment, image string, cfg *KubeConfig) ([]*replicaSet, graph.Graph, error) {
 	// Compute the URL of the export traces service.
 	var traceServiceURL string
 	jservice := cfg.Observability[tracesConfigKey]
@@ -653,62 +636,87 @@ func buildReplicaSetSpecs(dep *protos.Deployment, image string, cfg *KubeConfig)
 		// No trace to export.
 	}
 
-	// Build the replica sets.
-	for c, listeners := range components {
-		rsName := replicaSet(c, dep)
-		if _, found := rsets[rsName]; !found {
-			rsets[rsName] = &replicaSetInfo{
-				name:            rsName,
+	// Retrieve the components information from the binary.
+	components, cg, err := readBinary(dep, cfg)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	// For all co-located components, choose a component to serve as the
+	// primary. This will be the first component in each colocation group, as
+	// specified in the config file.
+	cmap := make(map[string]graph.Node, len(components)) // component name -> node
+	cg.PerNode(func(n graph.Node) {
+		cmap[components[n].Name] = n
+	})
+	primary := make([]graph.Node, len(components))
+	cg.PerNode(func(n graph.Node) { // default: each component its own primary
+		primary[n] = n
+	})
+	for _, group := range dep.App.Colocate {
+		if len(group.Components) == 0 {
+			continue
+		}
+		prim := cmap[group.Components[0]]
+		for _, c := range group.Components {
+			primary[cmap[c]] = prim
+		}
+	}
+
+	// Build the replica set information, along with an associated graph
+	// of replica sets.
+	replicaSets := make([]*replicaSet, len(components))
+	nodes := map[graph.Node]struct{}{}
+	cg.PerNode(func(n graph.Node) {
+		pn := primary[n]
+		nodes[graph.Node(pn)] = struct{}{}
+		if replicaSets[pn] == nil {
+			replicaSets[pn] = &replicaSet{
+				name:            components[pn].Name,
 				image:           image,
 				namespace:       cfg.Namespace,
 				dep:             dep,
-				components:      map[string]*ReplicaSetConfig_Listeners{},
 				internalPort:    internalPort,
 				traceServiceURL: traceServiceURL,
 			}
 		}
-
-		rsets[rsName].components[c] = listeners
-	}
-	fmt.Fprintf(os.Stderr, "Replica sets generated successfully %v\n", maps.Keys(rsets))
-	return rsets, nil
+		replicaSets[pn].components = append(replicaSets[pn].components, components[n])
+	})
+	edges := map[graph.Edge]struct{}{}
+	graph.PerEdge(cg, func(e graph.Edge) {
+		src := primary[e.Src]
+		dst := primary[e.Dst]
+		edges[graph.Edge{Src: src, Dst: dst}] = struct{}{}
+	})
+	return replicaSets, graph.NewAdjacencyGraph(maps.Keys(nodes), maps.Keys(edges)), nil
 }
 
-// replicaSet returns the name of the replica set that hosts the given component.
-func replicaSet(component string, dep *protos.Deployment) string {
-	for _, group := range dep.App.Colocate {
-		for _, c := range group.Components {
-			if c == component {
-				return group.Components[0]
-			}
-		}
-	}
-	return component
-}
-
-// getComponents returns the list of components from a binary.
-func getComponents(dep *protos.Deployment, cfg *KubeConfig) (map[string]*ReplicaSetConfig_Listeners, error) {
-	// Listeners, keyed by the component that owns them.
-	listeners := map[string]*ReplicaSetConfig_Listeners{}
-	components, g, err := bin.ReadComponentGraph(dep.App.Binary)
+// readBinary returns the component and listener information embedded in the
+// binary.
+func readBinary(dep *protos.Deployment, cfg *KubeConfig) ([]*ReplicaSetConfig_Component, graph.Graph, error) {
+	// Read the component graph from the binary.
+	cs, g, err := bin.ReadComponentGraph(dep.App.Binary)
 	if err != nil {
-		return nil, fmt.Errorf("unable to retrieve the call graph for binary %s: %w", dep.App.Binary, err)
+		return nil, nil, fmt.Errorf("unable to retrieve the call graph for binary %s: %w", dep.App.Binary, err)
 	}
+	components := make([]*ReplicaSetConfig_Component, len(cs))
 	g.PerNode(func(n graph.Node) {
-		listeners[components[n]] = &ReplicaSetConfig_Listeners{}
+		components[n] = &ReplicaSetConfig_Component{Name: cs[n]}
 	})
 
-	// Get listeners.
+	// Read the listeners information from the binary.
 	ls, err := bin.ReadListeners(dep.App.Binary)
 	if err != nil {
-		return nil, fmt.Errorf("unable to retrieve the listeners for binary %s: %w", dep.App.Binary, err)
+		return nil, nil, fmt.Errorf("unable to retrieve the listeners for binary %s: %w", dep.App.Binary, err)
+	}
+	listeners := make(map[string][]string, len(ls))
+	for _, l := range ls {
+		listeners[l.Component] = l.Listeners
 	}
 
-	for _, c := range ls {
-		if _, found := listeners[c.Component]; !found {
-			return nil, fmt.Errorf("listeners %v mapped to unknown component: %s", c.Listeners, c.Component)
-		}
-		for _, lis := range c.Listeners {
+	// Collate the two.
+	for _, c := range components {
+		for _, lis := range listeners[c.Name] {
 			public := false
 			if opts := cfg.Listeners[lis]; opts != nil && opts.Public {
 				public = true
@@ -721,13 +729,12 @@ func getComponents(dep *protos.Deployment, cfg *KubeConfig) (map[string]*Replica
 				port = externalPort
 				externalPort++
 			}
-			listeners[c.Component].Listeners = append(listeners[c.Component].Listeners,
-				&ReplicaSetConfig_Listener{
-					Name:         lis,
-					ExternalPort: port,
-					IsPublic:     public,
-				})
+			c.Listeners = append(c.Listeners, &ReplicaSetConfig_Listener{
+				Name:         lis,
+				ExternalPort: port,
+				IsPublic:     public,
+			})
 		}
 	}
-	return listeners, nil
+	return components, g, nil
 }

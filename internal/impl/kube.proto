@@ -22,18 +22,21 @@ import "runtime/protos/config.proto";
 // ReplicaSetConfig contains app deployment information that is needed by a
 // babysitter started using the kube deployer to manage a set of components.
 message ReplicaSetConfig {
-  message Listeners {
-    repeated Listener listeners = 1;
+  string namespace = 1;
+  string name = 2;
+  runtime.Deployment deployment = 3;
+  int32 internal_port = 4;
+  string trace_service_url = 5;
+
+  // Components hosted by the replica sets, and their network listeners.
+  message Component {
+    string name = 1;
+    repeated Listener listeners = 2;
   }
   message Listener {
     string name = 1;
     int32 external_port = 2;
     bool is_public = 3;
   }
-  runtime.Deployment deployment = 1;
-  string replica_set = 2;
-  map<string, Listeners> components_to_start = 3;
-  int32 internal_port = 4;
-  string namespace = 5;
-  string trace_service_url = 6;
+  repeated Component components = 6;
 }
