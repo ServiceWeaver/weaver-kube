@@ -202,7 +202,7 @@ func (r *replicaSet) buildDeployment(cfg *KubeConfig) (*appsv1.Deployment, error
 	} else {
 		matchLabels["depName"] = r.deploymentName()
 	}
-	dnsPolicy := corev1.DNSDefault
+	dnsPolicy := corev1.DNSClusterFirst
 	if cfg.UseHostNetwork {
 		dnsPolicy = corev1.DNSClusterFirstWithHostNet
 	}
