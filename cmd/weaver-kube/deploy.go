@@ -43,40 +43,36 @@ var (
 		Name:        "deploy",
 		Description: "Deploy a Service Weaver app",
 		Help: `Usage:
-  weaver kube deploy <configfile>
+  weaver kube deploy <config file>
 
 Flags:
   -h, --help	Print this help message.
 
 Container Image Names:
   "weaver kube deploy" builds a container image locally, and optionally uploads
-  it to a container repository. The repository can be specified using the
-  "repo" field inside the "kube" section of the config file. For example,
-  consider the following config file:
+  it to a container repository. The name of the image and the repository to
+  which the image is uploaded are specified using the "image" and "repo" fields
+  inside the "kube" section of the config file. For example, consider the
+  following config file:
 
       [serviceweaver]
       binary = "./foo"
 
       [kube]
-      tag  = "foo/foo:0.0.1"
-      repo = "docker.io/my_docker_hub_username/my_repo"
+      image = "foo:0.0.1"
+      repo  = "docker.io/my_docker_hub_username"
 
-  Using this config file, "weaver kube deploy" will build a container
-  with a local build tag [1] "foo/foo:0.0.1", and upload it to the
-  "docker.io/my_docker_hub_username/my_repo" repository. If the "tag" is not
-  specified, it defaults to "<app_name>:<app_version>. If the "repo"
-  is not specified, the container is not uploaded and must be pushed
-  manually to the Kubernetes environments.
-  
+  Using this config file, "weaver kube deploy" will build an image named
+  "foo:0.0.1" and upload it to "docker.io/my_docker_hub_username/foo:0.0.1". If
+  the "image" field is not specified, the image name defaults to
+  "<app_name>:<app_version>". If the "repo" field is not specified, the
+  container is not uploaded.
+
   Example repositories are:
-      - Docker Hub:                docker.io/USERNAME/REPO_NAME
-      - Google Artifact Registry:  LOCATION-docker.pkg.dev/PROJECT-ID/REPO_NAME
-      - GitHub Container Registry: ghcr.io/NAMESPACE
 
-  Note that the final image tag for the application container will
-  be a concatenation of repo and tag fields, i.e., "repo/tag".
-  
-  [1]: https://docs.docker.com/engine/reference/commandline/tag/`,
+      - Docker Hub:                docker.io/USERNAME
+      - Google Artifact Registry:  LOCATION-docker.pkg.dev/PROJECT-ID
+      - GitHub Container Registry: ghcr.io/NAMESPACE`,
 		Flags: flags,
 		Fn:    deploy,
 	}
@@ -144,7 +140,7 @@ func deploy(ctx context.Context, args []string) error {
 	}
 
 	// Build the docker image for the deployment.
-	image, err := impl.BuildAndUploadDockerImage(ctx, dep, config.LocalTag, config.Repo)
+	image, err := impl.BuildAndUploadDockerImage(ctx, dep, config.Image, config.Repo)
 	if err != nil {
 		return err
 	}
@@ -183,13 +179,13 @@ func checkVersionCompatibility(appBinary string) error {
 	github.com/ServiceWeaver/weaver module version %s. However, the 'weaver-kube'
 	binary you're using was built with weaver module version %s. These versions are
 	incompatible.
-	
+
 	We recommend updating both the weaver module your application is built with and
 	updating the 'weaver-kube' command by running the following.
-	
+
 		go get github.com/ServiceWeaver/weaver@latest
 		go install github.com/ServiceWeaver/weaver-kube/cmd/weaver-kube@latest
-	
+
 	Then, re-build your code and re-run 'weaver-kube deploy'. If the problem
 	persists, please file an issue at https://github.com/ServiceWeaver/weaver/issues`,
 			relativize(appBinary), versions.ModuleVersion, selfVersion)
