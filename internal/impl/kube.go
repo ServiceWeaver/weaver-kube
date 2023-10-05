@@ -93,28 +93,27 @@ type ListenerOptions struct {
 // KubeConfig stores the configuration information for one execution of a
 // Service Weaver application deployed using the Kube deployer.
 type KubeConfig struct {
-	// LocalTag is the build tag for the application container on the local
-	// machine.
+	// Image is the name of the container image hosting the Service Weaver
+	// application.
 	//
-	// If empty, the tag defaults to "<app_name>:<app_version>", where
-	// <app_version> is the unique version id of the application deployment.
-	LocalTag string `toml:"local_tag"`
+	// If empty, the image name defaults to "<app_name>:<app_version>", where
+	// <app_name> is the name of the app, and <app_version> is the unique
+	// version id of the application deployment.
+	Image string
 
-	// Repo is the name of the repository the container should be uploaded to.
-	// For example, if set to "docker.io/alanturing/repo", "weaver kube deploy"
-	// will build the container locally, tag it with the appropriate Tag, and
-	// then push it to "docker.io/alanturing/repo".
+	// Repo is the name of the repository where the container image is uploaded.
 	//
-	// If empty, the container is built and tagged locally, but is not pushed
-	// to a repository.
+	// For example, if Image is "mycontainer:v1" and Repo is
+	// "docker.io/alanturing", then "weaver kube deploy" will build the image
+	// locally as "mycontainer:v1" and then push it to
+	// "docker.io/alanturing/mycontainer:v1".
+	//
+	// If empty, the image is not pushed to a repository.
 	//
 	// Example repositories are:
-	//   - Docker Hub               :  docker.io/USERNAME/REPO_NAME
-	//   - Google Artifact Registry :  LOCATION-docker.pkg.dev/PROJECT-ID/REPO_NAME
-	//   - GitHub Container Registry: ghcr.io/NAMESPACE
-	//
-	// Note that the final image tag for the application container will
-	// be a concatenation of Repo and Tag, i.e., "Repo/Tag".
+	//   - Docker Hub                : docker.io/USERNAME
+	//   - Google Artifact Registry  : LOCATION-docker.pkg.dev/PROJECT-ID
+	//   - GitHub Container Registry : ghcr.io/NAMESPACE
 	Repo string
 
 	// Namespace is the name of the Kubernetes namespace where the application
