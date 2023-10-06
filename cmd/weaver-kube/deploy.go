@@ -26,7 +26,6 @@ import (
 	swruntime "github.com/ServiceWeaver/weaver/runtime"
 	"github.com/ServiceWeaver/weaver/runtime/bin"
 	"github.com/ServiceWeaver/weaver/runtime/codegen"
-	"github.com/ServiceWeaver/weaver/runtime/protos"
 	"github.com/ServiceWeaver/weaver/runtime/tool"
 	"github.com/ServiceWeaver/weaver/runtime/version"
 	"github.com/google/uuid"
@@ -133,20 +132,17 @@ func deploy(ctx context.Context, args []string) error {
 		}
 	}
 
-	// Create a deployment.
-	dep := &protos.Deployment{
-		Id:  uuid.New().String(),
-		App: app,
-	}
+	// Unique app deployment identifier.
+	depId := uuid.New().String()
 
 	// Build the docker image for the deployment.
-	image, err := impl.BuildAndUploadDockerImage(ctx, dep, config.Image, config.Repo)
+	image, err := impl.BuildAndUploadDockerImage(ctx, app, depId, config.Image, config.Repo)
 	if err != nil {
 		return err
 	}
 
 	// Generate the kube deployment information.
-	return impl.GenerateYAMLs(image, dep, config)
+	return impl.GenerateYAMLs(image, app, depId, config)
 }
 
 // checkVersionCompatibility checks that the tool binary is compatible with

@@ -24,9 +24,10 @@ import "runtime/protos/config.proto";
 message ReplicaSetConfig {
   string namespace = 1;
   string name = 2;
-  runtime.Deployment deployment = 3;
-  int32 internal_port = 4;
-  string trace_service_url = 5;
+  string dep_id = 3;
+  runtime.AppConfig app = 4;
+  int32 internal_port = 5;
+  string trace_service_url = 6;
 
   // Components hosted by the replica sets, and their network listeners.
   message Component {
@@ -39,5 +40,5 @@ message ReplicaSetConfig {
     int32 external_port = 3;
     bool is_public = 4;
   }
-  repeated Component components = 6;
+  repeated Component components = 7;
 }

@@ -59,9 +59,10 @@ type buildSpec struct {
 // BuildAndUploadDockerImage builds a docker image and uploads it to a remote
 // repo, if one is specified. It returns the image name that should be used in
 // Kubernetes YAML files.
-func BuildAndUploadDockerImage(ctx context.Context, dep *protos.Deployment, image, repo string) (string, error) {
+func BuildAndUploadDockerImage(ctx context.Context, app *protos.AppConfig, depId string,
+	image, repo string) (string, error) {
 	// Create the build specifications.
-	spec, err := dockerBuildSpec(dep, image)
+	spec, err := dockerBuildSpec(app, depId, image)
 	if err != nil {
 		return "", fmt.Errorf("unable to build image spec: %w", err)
 	}
@@ -82,13 +83,13 @@ func BuildAndUploadDockerImage(ctx context.Context, dep *protos.Deployment, imag
 }
 
 // dockerBuildSpec creates a build specification for an app deployment.
-func dockerBuildSpec(dep *protos.Deployment, image string) (*buildSpec, error) {
+func dockerBuildSpec(app *protos.AppConfig, depId string, image string) (*buildSpec, error) {
 	// Figure out which tool binary will run inside the container.
 	toolVersion, toolIsDev, err := ToolVersion()
 	if err != nil {
 		return nil, err
 	}
-	toCopy := []string{dep.App.Binary}
+	toCopy := []string{app.Binary}
 	var toInstall []string
 	if runtime.GOOS == "linux" && runtime.GOARCH == "amd64" {
 		// The running tool binary can run inside the container: copy it.
@@ -117,7 +118,7 @@ downloaded and installed in the container. Do you want to proceed? [Y/n] `)
 	}
 
 	if image == "" {
-		image = fmt.Sprintf("%s:%s", dep.App.Name, dep.Id[:8])
+		image = fmt.Sprintf("%s:%s", app.Name, depId[:8])
 	}
 
 	return &buildSpec{
