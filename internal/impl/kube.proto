@@ -35,8 +35,9 @@ message ReplicaSetConfig {
   }
   message Listener {
     string name = 1;
-    int32 external_port = 2;
-    bool is_public = 3;
+    string service_name = 2;
+    int32 external_port = 3;
+    bool is_public = 4;
   }
   repeated Component components = 6;
 }

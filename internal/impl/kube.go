@@ -79,6 +79,10 @@ type replicaSet struct {
 
 // ListenerOptions stores configuration options for a listener.
 type ListenerOptions struct {
+	// If specified, the listener service will have the name set to this value.
+	// Otherwise, we will generate a unique name for each app version.
+	ServiceName string `toml:"service_name"`
+
 	// Is the listener public, i.e., should it receive ingress traffic
 	// from the public internet. If false, the listener is configured only
 	// for cluster-internal access.
@@ -168,11 +172,6 @@ type KubeConfig struct {
 	Observability map[string]string
 }
 
-// globalName returns an unique name that persists across app versions.
-func (r *replicaSet) globalName() string {
-	return name{r.dep.App.Name, r.name}.DNSLabel()
-}
-
 // deploymentName returns a name that is version specific.
 func (r *replicaSet) deploymentName() string {
 	return name{r.dep.App.Name, r.name, r.dep.Id[:8]}.DNSLabel()
@@ -184,22 +183,12 @@ func (r *replicaSet) deploymentName() string {
 // collocated with main, and a component bar that is not collocated with main
 // calls foo.
 func (r *replicaSet) buildDeployment(cfg *KubeConfig) (*appsv1.Deployment, error) {
-	matchLabels := map[string]string{}
+	name := r.deploymentName()
+	matchLabels := map[string]string{"depName": name}
 	podLabels := map[string]string{
 		"appName": r.dep.App.Name,
-		"depName": r.deploymentName(),
+		"depName": name,
 		"metrics": r.dep.App.Name, // Needed by Prometheus to scrape the metrics.
-	}
-	name := r.deploymentName()
-	if r.hasListeners() {
-		name = r.globalName()
-
-		// Set the match and the pod labels, so they can be reachable across
-		// multiple app versions.
-		matchLabels["globalName"] = r.globalName()
-		podLabels["globalName"] = r.globalName()
-	} else {
-		matchLabels["depName"] = r.deploymentName()
 	}
 	dnsPolicy := corev1.DNSClusterFirst
 	if cfg.UseHostNetwork {
@@ -218,6 +207,7 @@ func (r *replicaSet) buildDeployment(cfg *KubeConfig) (*appsv1.Deployment, error
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      name,
 			Namespace: r.namespace,
+			Labels:    map[string]string{"version": r.dep.Id[:8]},
 		},
 		Spec: appsv1.DeploymentSpec{
 			Selector: &metav1.LabelSelector{
@@ -234,13 +224,6 @@ func (r *replicaSet) buildDeployment(cfg *KubeConfig) (*appsv1.Deployment, error
 					HostNetwork: cfg.UseHostNetwork,
 				},
 			},
-			Strategy: appsv1.DeploymentStrategy{
-				Type:          "RollingUpdate",
-				RollingUpdate: &appsv1.RollingUpdateDeployment{},
-			},
-			// Number of old ReplicaSets to retain to allow rollback.
-			RevisionHistoryLimit: ptrOf(int32(1)),
-			MinReadySeconds:      int32(5),
 		},
 	}, nil
 }
@@ -251,10 +234,13 @@ func (r *replicaSet) buildDeployment(cfg *KubeConfig) (*appsv1.Deployment, error
 // it has to be reachable from the outside; for internal listeners, we generate
 // a ClusterIP service, reachable only from internal Service Weaver services.
 func (r *replicaSet) buildListenerService(lis *ReplicaSetConfig_Listener) (*corev1.Service, error) {
-	// Unique name that persists across app versions.
 	// TODO(rgrandl): Specify whether the listener is public in the name.
-	globalLisName := name{r.dep.App.Name, "lis", lis.Name}.DNSLabel()
-
+	// If the service name for the listener is not specified by the user, generate
+	// a deployment based service name.
+	lisServiceName := lis.ServiceName
+	if lisServiceName == "" {
+		lisServiceName = name{r.dep.App.Name, "lis", lis.Name, r.dep.Id[:8]}.DNSLabel()
+	}
 	var serviceType string
 	if lis.IsPublic {
 		serviceType = "LoadBalancer"
@@ -268,16 +254,17 @@ func (r *replicaSet) buildListenerService(lis *ReplicaSetConfig_Listener) (*core
 			Kind:       "Service",
 		},
 		ObjectMeta: metav1.ObjectMeta{
-			Name:      globalLisName,
+			Name:      lisServiceName,
 			Namespace: r.namespace,
 			Labels: map[string]string{
 				"lisName": lis.Name,
+				"version": r.dep.Id[:8],
 			},
 		},
 		Spec: corev1.ServiceSpec{
 			Type: corev1.ServiceType(serviceType),
 			Selector: map[string]string{
-				"globalName": r.globalName(),
+				"depName": r.deploymentName(),
 			},
 			Ports: []corev1.ServicePort{
 				{
@@ -294,13 +281,7 @@ func (r *replicaSet) buildListenerService(lis *ReplicaSetConfig_Listener) (*core
 func (r *replicaSet) buildAutoscaler() (*autoscalingv2.HorizontalPodAutoscaler, error) {
 	// Per deployment name that is app version specific.
 	aname := name{r.dep.App.Name, "hpa", r.name, r.dep.Id[:8]}.DNSLabel()
-
-	var depName string
-	if r.hasListeners() {
-		depName = r.globalName()
-	} else {
-		depName = r.deploymentName()
-	}
+	depName := r.deploymentName()
 	return &autoscalingv2.HorizontalPodAutoscaler{
 		TypeMeta: metav1.TypeMeta{
 			APIVersion: "autoscaling/v2",
@@ -309,6 +290,7 @@ func (r *replicaSet) buildAutoscaler() (*autoscalingv2.HorizontalPodAutoscaler, 
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      aname,
 			Namespace: r.namespace,
+			Labels:    map[string]string{"version": r.dep.Id[:8]},
 		},
 		Spec: autoscalingv2.HorizontalPodAutoscalerSpec{
 			ScaleTargetRef: autoscalingv2.CrossVersionObjectReference{
@@ -401,16 +383,6 @@ func (r *replicaSet) buildContainer() (corev1.Container, error) {
 	}, nil
 }
 
-// hasListeners returns whether a given replica set exports any listeners.
-func (r *replicaSet) hasListeners() bool {
-	for _, listeners := range r.components {
-		if listeners.Listeners != nil {
-			return true
-		}
-	}
-	return false
-}
-
 // GenerateYAMLs generates Kubernetes YAML configurations for a given
 // application version.
 //
@@ -443,6 +415,8 @@ func GenerateYAMLs(image string, dep *protos.Deployment, cfg *KubeConfig) error 
 
 	// Generate roles and role bindings.
 	var generated []byte
+	header := fmt.Sprintf("# To delete this deployment run:\n#  `kubectl delete all --selector=version=%s`\n\n", dep.Id[:8])
+	generated = append(generated, []byte(header)...)
 	content, err := generateRolesAndBindings(cfg.Namespace)
 	if err != nil {
 		return fmt.Errorf("unable to generate roles and bindings: %w", err)
@@ -728,8 +702,13 @@ func readBinary(dep *protos.Deployment, cfg *KubeConfig) ([]*ReplicaSetConfig_Co
 				port = externalPort
 				externalPort++
 			}
+			var serviceName string
+			if opts := cfg.Listeners[lis]; opts != nil && opts.ServiceName != "" {
+				serviceName = opts.ServiceName
+			}
 			c.Listeners = append(c.Listeners, &ReplicaSetConfig_Listener{
 				Name:         lis,
+				ServiceName:  serviceName,
 				ExternalPort: port,
 				IsPublic:     public,
 			})
