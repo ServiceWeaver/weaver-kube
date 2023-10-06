@@ -72,7 +72,8 @@ type replicaSet struct {
 	components      []*ReplicaSetConfig_Component // components hosted by replica set
 	image           string                        // name of the image to be deployed
 	namespace       string                        // namespace of the replica set
-	dep             *protos.Deployment            // deployment info
+	depId           string                        // app deployment identifier
+	app             *protos.AppConfig             // app configuration
 	internalPort    int                           // internal weavelet port
 	traceServiceURL string                        // trace exporter URL
 }
@@ -174,7 +175,7 @@ type KubeConfig struct {
 
 // deploymentName returns a name that is version specific.
 func (r *replicaSet) deploymentName() string {
-	return name{r.dep.App.Name, r.name, r.dep.Id[:8]}.DNSLabel()
+	return name{r.app.Name, r.name, r.depId[:8]}.DNSLabel()
 }
 
 // buildDeployment generates a kubernetes deployment for a replica set.
@@ -186,9 +187,9 @@ func (r *replicaSet) buildDeployment(cfg *KubeConfig) (*appsv1.Deployment, error
 	name := r.deploymentName()
 	matchLabels := map[string]string{"depName": name}
 	podLabels := map[string]string{
-		"appName": r.dep.App.Name,
+		"appName": r.app.Name,
 		"depName": name,
-		"metrics": r.dep.App.Name, // Needed by Prometheus to scrape the metrics.
+		"metrics": r.app.Name, // Needed by Prometheus to scrape the metrics.
 	}
 	dnsPolicy := corev1.DNSClusterFirst
 	if cfg.UseHostNetwork {
@@ -207,7 +208,7 @@ func (r *replicaSet) buildDeployment(cfg *KubeConfig) (*appsv1.Deployment, error
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      name,
 			Namespace: r.namespace,
-			Labels:    map[string]string{"version": r.dep.Id[:8]},
+			Labels:    map[string]string{"version": r.depId[:8]},
 		},
 		Spec: appsv1.DeploymentSpec{
 			Selector: &metav1.LabelSelector{
@@ -239,7 +240,7 @@ func (r *replicaSet) buildListenerService(lis *ReplicaSetConfig_Listener) (*core
 	// a deployment based service name.
 	lisServiceName := lis.ServiceName
 	if lisServiceName == "" {
-		lisServiceName = name{r.dep.App.Name, "lis", lis.Name, r.dep.Id[:8]}.DNSLabel()
+		lisServiceName = name{r.app.Name, "lis", lis.Name, r.depId[:8]}.DNSLabel()
 	}
 	var serviceType string
 	if lis.IsPublic {
@@ -258,7 +259,7 @@ func (r *replicaSet) buildListenerService(lis *ReplicaSetConfig_Listener) (*core
 			Namespace: r.namespace,
 			Labels: map[string]string{
 				"lisName": lis.Name,
-				"version": r.dep.Id[:8],
+				"version": r.depId[:8],
 			},
 		},
 		Spec: corev1.ServiceSpec{
@@ -280,7 +281,7 @@ func (r *replicaSet) buildListenerService(lis *ReplicaSetConfig_Listener) (*core
 // buildAutoscaler generates a kubernetes horizontal pod autoscaler for a replica set.
 func (r *replicaSet) buildAutoscaler() (*autoscalingv2.HorizontalPodAutoscaler, error) {
 	// Per deployment name that is app version specific.
-	aname := name{r.dep.App.Name, "hpa", r.name, r.dep.Id[:8]}.DNSLabel()
+	aname := name{r.app.Name, "hpa", r.name, r.depId[:8]}.DNSLabel()
 	depName := r.deploymentName()
 	return &autoscalingv2.HorizontalPodAutoscaler{
 		TypeMeta: metav1.TypeMeta{
@@ -290,7 +291,7 @@ func (r *replicaSet) buildAutoscaler() (*autoscalingv2.HorizontalPodAutoscaler, 
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      aname,
 			Namespace: r.namespace,
-			Labels:    map[string]string{"version": r.dep.Id[:8]},
+			Labels:    map[string]string{"version": r.depId[:8]},
 		},
 		Spec: autoscalingv2.HorizontalPodAutoscalerSpec{
 			ScaleTargetRef: autoscalingv2.CrossVersionObjectReference{
@@ -322,11 +323,12 @@ func (r *replicaSet) buildAutoscaler() (*autoscalingv2.HorizontalPodAutoscaler, 
 func (r *replicaSet) buildContainer() (corev1.Container, error) {
 	// Set the binary path in the deployment w.r.t. to the binary path in the
 	// docker image.
-	r.dep.App.Binary = fmt.Sprintf("/weaver/%s", filepath.Base(r.dep.App.Binary))
+	r.app.Binary = fmt.Sprintf("/weaver/%s", filepath.Base(r.app.Binary))
 	kubeCfgStr, err := proto.ToEnv(&ReplicaSetConfig{
 		Namespace:       r.namespace,
 		Name:            r.name,
-		Deployment:      r.dep,
+		DepId:           r.depId,
+		App:             r.app,
 		InternalPort:    int32(r.internalPort),
 		TraceServiceUrl: r.traceServiceURL,
 		Components:      r.components,
@@ -410,12 +412,12 @@ func (r *replicaSet) buildContainer() (corev1.Container, error) {
 //
 //   - If observability services are enabled (e.g., Prometheus, Jaeger), a
 //     Kubernetes Deployment and/or a Service for each observability service.
-func GenerateYAMLs(image string, dep *protos.Deployment, cfg *KubeConfig) error {
+func GenerateYAMLs(image string, app *protos.AppConfig, depId string, cfg *KubeConfig) error {
 	fmt.Fprintf(os.Stderr, greenText(), "\nGenerating kube deployment info ...")
 
 	// Generate roles and role bindings.
 	var generated []byte
-	header := fmt.Sprintf("# To delete this deployment run:\n#  `kubectl delete all --selector=version=%s`\n\n", dep.Id[:8])
+	header := fmt.Sprintf("# To delete this deployment run:\n#  `kubectl delete all --selector=version=%s`\n\n", depId[:8])
 	generated = append(generated, []byte(header)...)
 	content, err := generateRolesAndBindings(cfg.Namespace)
 	if err != nil {
@@ -424,21 +426,21 @@ func GenerateYAMLs(image string, dep *protos.Deployment, cfg *KubeConfig) error 
 	generated = append(generated, content...)
 
 	// Generate core YAMLs (deployments, services, autoscalers).
-	content, err = generateCoreYAMLs(dep, cfg, image)
+	content, err = generateCoreYAMLs(app, depId, cfg, image)
 	if err != nil {
 		return fmt.Errorf("unable to create kube app deployment: %w", err)
 	}
 	generated = append(generated, content...)
 
 	// Generate deployment info needed to get insights into the application.
-	content, err = generateObservabilityYAMLs(dep, cfg)
+	content, err = generateObservabilityYAMLs(app.Name, cfg)
 	if err != nil {
 		return fmt.Errorf("unable to create configuration information: %w", err)
 	}
 	generated = append(generated, content...)
 
 	// Write the generated kube info into a file.
-	yamlFile := filepath.Join(os.TempDir(), fmt.Sprintf("kube_%s.yaml", dep.Id))
+	yamlFile := filepath.Join(os.TempDir(), fmt.Sprintf("kube_%s.yaml", depId))
 	f, err := os.OpenFile(yamlFile, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
 	if err != nil {
 		return err
@@ -526,10 +528,10 @@ func generateRolesAndBindings(namespace string) ([]byte, error) {
 }
 
 // generateCoreYAMLs generates the core YAMLs for the given deployment.
-func generateCoreYAMLs(dep *protos.Deployment, cfg *KubeConfig, image string) ([]byte, error) {
+func generateCoreYAMLs(app *protos.AppConfig, depId string, cfg *KubeConfig, image string) ([]byte, error) {
 	// Generate the kubernetes replica sets for the deployment, along with
 	// their communication graph.
-	replicaSets, rg, err := buildReplicaSets(dep, image, cfg)
+	replicaSets, rg, err := buildReplicaSets(app, depId, image, cfg)
 	if err != nil {
 		return nil, fmt.Errorf("unable to create replica sets: %w", err)
 	}
@@ -594,14 +596,14 @@ func generateCoreYAMLs(dep *protos.Deployment, cfg *KubeConfig, image string) ([
 // buildReplicaSets returns the replica sets that will be used for the
 // given deployment, along with the communication graph used between those
 // replica sets.
-func buildReplicaSets(dep *protos.Deployment, image string, cfg *KubeConfig) ([]*replicaSet, graph.Graph, error) {
+func buildReplicaSets(app *protos.AppConfig, depId string, image string, cfg *KubeConfig) ([]*replicaSet, graph.Graph, error) {
 	// Compute the URL of the export traces service.
 	var traceServiceURL string
 	jservice := cfg.Observability[tracesConfigKey]
 	switch {
 	case jservice == auto:
 		// Point to the service launched by the kube deployer.
-		traceServiceURL = fmt.Sprintf("http://%s:%d/api/traces", name{dep.App.Name, jaegerAppName}.DNSLabel(), defaultJaegerCollectorPort)
+		traceServiceURL = fmt.Sprintf("http://%s:%d/api/traces", name{app.Name, jaegerAppName}.DNSLabel(), defaultJaegerCollectorPort)
 	case jservice != disabled:
 		// Point to the service launched by the user.
 		traceServiceURL = fmt.Sprintf("http://%s:%d/api/traces", jservice, defaultJaegerCollectorPort)
@@ -610,7 +612,7 @@ func buildReplicaSets(dep *protos.Deployment, image string, cfg *KubeConfig) ([]
 	}
 
 	// Retrieve the components information from the binary.
-	components, cg, err := readBinary(dep, cfg)
+	components, cg, err := readBinary(app, cfg)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -626,7 +628,7 @@ func buildReplicaSets(dep *protos.Deployment, image string, cfg *KubeConfig) ([]
 	cg.PerNode(func(n graph.Node) { // default: each component its own primary
 		primary[n] = n
 	})
-	for _, group := range dep.App.Colocate {
+	for _, group := range app.Colocate {
 		if len(group.Components) == 0 {
 			continue
 		}
@@ -648,7 +650,8 @@ func buildReplicaSets(dep *protos.Deployment, image string, cfg *KubeConfig) ([]
 				name:            components[pn].Name,
 				image:           image,
 				namespace:       cfg.Namespace,
-				dep:             dep,
+				depId:           depId,
+				app:             app,
 				internalPort:    internalPort,
 				traceServiceURL: traceServiceURL,
 			}
@@ -666,11 +669,11 @@ func buildReplicaSets(dep *protos.Deployment, image string, cfg *KubeConfig) ([]
 
 // readBinary returns the component and listener information embedded in the
 // binary.
-func readBinary(dep *protos.Deployment, cfg *KubeConfig) ([]*ReplicaSetConfig_Component, graph.Graph, error) {
+func readBinary(app *protos.AppConfig, cfg *KubeConfig) ([]*ReplicaSetConfig_Component, graph.Graph, error) {
 	// Read the component graph from the binary.
-	cs, g, err := bin.ReadComponentGraph(dep.App.Binary)
+	cs, g, err := bin.ReadComponentGraph(app.Binary)
 	if err != nil {
-		return nil, nil, fmt.Errorf("unable to retrieve the call graph for binary %s: %w", dep.App.Binary, err)
+		return nil, nil, fmt.Errorf("unable to retrieve the call graph for binary %s: %w", app.Binary, err)
 	}
 	components := make([]*ReplicaSetConfig_Component, len(cs))
 	g.PerNode(func(n graph.Node) {
@@ -678,9 +681,9 @@ func readBinary(dep *protos.Deployment, cfg *KubeConfig) ([]*ReplicaSetConfig_Co
 	})
 
 	// Read the listeners information from the binary.
-	ls, err := bin.ReadListeners(dep.App.Binary)
+	ls, err := bin.ReadListeners(app.Binary)
 	if err != nil {
-		return nil, nil, fmt.Errorf("unable to retrieve the listeners for binary %s: %w", dep.App.Binary, err)
+		return nil, nil, fmt.Errorf("unable to retrieve the listeners for binary %s: %w", app.Binary, err)
 	}
 	listeners := make(map[string][]string, len(ls))
 	for _, l := range ls {

@@ -88,14 +88,14 @@ func RunBabysitter(ctx context.Context) error {
 
 	// Create the envelope.
 	wlet := &protos.EnvelopeInfo{
-		App:             cfg.Deployment.App.Name,
-		DeploymentId:    cfg.Deployment.Id,
+		App:             cfg.App.Name,
+		DeploymentId:    cfg.DepId,
 		Id:              uuid.New().String(),
-		Sections:        cfg.Deployment.App.Sections,
+		Sections:        cfg.App.Sections,
 		RunMain:         cfg.Name == runtime.Main,
 		InternalAddress: fmt.Sprintf("%s:%d", host, cfg.InternalPort),
 	}
-	e, err := envelope.NewEnvelope(ctx, wlet, cfg.Deployment.App)
+	e, err := envelope.NewEnvelope(ctx, wlet, cfg.App)
 	if err != nil {
 		return err
 	}
@@ -108,7 +108,7 @@ func RunBabysitter(ctx context.Context) error {
 	logSaver := fs.Add
 	logger := slog.New(&logging.LogHandler{
 		Opts: logging.Options{
-			App:       cfg.Deployment.App.Name,
+			App:       cfg.App.Name,
 			Component: "deployer",
 			Weavelet:  uuid.NewString(),
 			Attrs:     []string{"serviceweaver/system", ""},
@@ -221,8 +221,8 @@ func (b *babysitter) watchPods(ctx context.Context, component string) error {
 	b.mu.Unlock()
 
 	// Watch the pods running the requested component.
-	rs := replicaSetName(component, b.cfg.Deployment)
-	name := name{b.cfg.Deployment.App.Name, rs, b.cfg.Deployment.Id[:8]}.DNSLabel()
+	rs := replicaSetName(component, b.cfg.App)
+	name := name{b.cfg.App.Name, rs, b.cfg.DepId[:8]}.DNSLabel()
 	opts := metav1.ListOptions{LabelSelector: fmt.Sprintf("depName=%s", name)}
 	watcher, err := b.clientset.CoreV1().Pods(b.cfg.Namespace).Watch(ctx, opts)
 	if err != nil {
@@ -355,8 +355,8 @@ func serveHTTP(ctx context.Context, lis net.Listener, handler http.Handler) erro
 
 // replicaSetName returns the name of the replica set that hosts a given
 // component.
-func replicaSetName(component string, dep *protos.Deployment) string {
-	for _, group := range dep.App.Colocate {
+func replicaSetName(component string, app *protos.AppConfig) string {
+	for _, group := range app.Colocate {
 		for _, c := range group.Components {
 			if c == component {
 				return group.Components[0]
