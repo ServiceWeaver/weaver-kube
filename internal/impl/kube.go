@@ -189,14 +189,17 @@ func (r *replicaSet) buildDeployment(cfg *KubeConfig) (*appsv1.Deployment, error
 	podLabels := map[string]string{
 		"appName": r.app.Name,
 		"depName": name,
-		"metrics": r.app.Name, // Needed by Prometheus to scrape the metrics.
 	}
+	if cfg.Observability[metricsConfigKey] != disabled {
+		podLabels["metrics"] = r.app.Name // Needed by Prometheus to scrape the metrics.
+	}
+
 	dnsPolicy := corev1.DNSClusterFirst
 	if cfg.UseHostNetwork {
 		dnsPolicy = corev1.DNSClusterFirstWithHostNet
 	}
 
-	container, err := r.buildContainer()
+	container, err := r.buildContainer(cfg)
 	if err != nil {
 		return nil, err
 	}
@@ -320,7 +323,7 @@ func (r *replicaSet) buildAutoscaler() (*autoscalingv2.HorizontalPodAutoscaler, 
 }
 
 // buildContainer builds a container specification for a replica set.
-func (r *replicaSet) buildContainer() (corev1.Container, error) {
+func (r *replicaSet) buildContainer(cfg *KubeConfig) (corev1.Container, error) {
 	// Set the binary path in the deployment w.r.t. to the binary path in the
 	// docker image.
 	r.app.Binary = fmt.Sprintf("/weaver/%s", filepath.Base(r.app.Binary))
@@ -339,9 +342,7 @@ func (r *replicaSet) buildContainer() (corev1.Container, error) {
 
 	// Always expose the metrics port from the container, so it can be
 	// discoverable for scraping by Prometheus.
-	ports := []corev1.ContainerPort{
-		{Name: "prometheus", ContainerPort: defaultMetricsPort},
-	}
+	var ports []corev1.ContainerPort
 	// Expose all of the listener ports.
 	for _, ls := range r.components {
 		for _, l := range ls.Listeners {
@@ -350,6 +351,17 @@ func (r *replicaSet) buildContainer() (corev1.Container, error) {
 				ContainerPort: l.ExternalPort,
 			})
 		}
+	}
+
+	if cfg.Observability[metricsConfigKey] != disabled {
+		// Expose the metrics port from the container, so it can be discoverable for
+		// scraping by Prometheus.
+		// TODO(rgrandl): We may want to have a default metrics port that can be scraped
+		// by any metrics collection system. For now, disable the port if Prometheus
+		// will not collect the metrics.
+		ports = append(ports, corev1.ContainerPort{
+			Name: "prometheus", ContainerPort: defaultMetricsPort,
+		})
 	}
 
 	return corev1.Container{
