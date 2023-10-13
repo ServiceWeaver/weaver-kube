@@ -3,8 +3,8 @@ module github.com/ServiceWeaver/weaver-kube
 go 1.21
 
 require (
-	github.com/ServiceWeaver/weaver v0.21.3-0.20230925211757-1dba46274053
-	github.com/google/uuid v1.3.0
+	github.com/ServiceWeaver/weaver v0.22.0
+	github.com/google/uuid v1.3.1
 	go.opentelemetry.io/otel v1.16.0
 	go.opentelemetry.io/otel/exporters/jaeger v1.16.0
 	go.opentelemetry.io/otel/sdk v1.16.0
@@ -57,7 +57,7 @@ require (
 	golang.org/x/net v0.12.0 // indirect
 	golang.org/x/oauth2 v0.0.0-20220223155221-ee480838109b // indirect
 	golang.org/x/sync v0.3.0 // indirect
-	golang.org/x/sys v0.10.0 // indirect
+	golang.org/x/sys v0.11.0 // indirect
 	golang.org/x/term v0.10.0 // indirect
 	golang.org/x/text v0.11.0 // indirect
 	golang.org/x/time v0.0.0-20220210224613-90d013bbcef8 // indirect
