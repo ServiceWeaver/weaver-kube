@@ -20,6 +20,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"github.com/ServiceWeaver/weaver-kube/internal/proto"
 	"github.com/ServiceWeaver/weaver/runtime/bin"
@@ -173,9 +174,30 @@ type KubeConfig struct {
 	Observability map[string]string
 }
 
+// shortenComponent shortens the given component name to be of the format
+// <pkg>-<IfaceType>. (Recall that the full component name is of the format
+// <path1>/<path2>/.../<pathN>/<IfaceType>.)
+func shortenComponent(component string) string {
+	parts := strings.Split(component, "/")
+	switch len(parts) {
+	case 0: // should never happen
+		panic(fmt.Errorf("invalid component name: %s", component))
+	case 1:
+		return parts[0]
+	default:
+		return fmt.Sprintf("%s-%s", parts[len(parts)-2], parts[len(parts)-1])
+	}
+}
+
+func deploymentName(app, component, deploymentId string) string {
+	hash := hash8([]string{app, component, deploymentId})
+	shortened := strings.ToLower(shortenComponent(component))
+	return fmt.Sprintf("%s-%s-%s", shortened, deploymentId[:8], hash)
+}
+
 // deploymentName returns a name that is version specific.
 func (r *replicaSet) deploymentName() string {
-	return name{r.app.Name, r.name, r.depId[:8]}.DNSLabel()
+	return deploymentName(r.app.Name, r.name, r.depId)
 }
 
 // buildDeployment generates a kubernetes deployment for a replica set.
@@ -243,7 +265,7 @@ func (r *replicaSet) buildListenerService(lis *ReplicaSetConfig_Listener) (*core
 	// a deployment based service name.
 	lisServiceName := lis.ServiceName
 	if lisServiceName == "" {
-		lisServiceName = name{r.app.Name, "lis", lis.Name, r.depId[:8]}.DNSLabel()
+		lisServiceName = fmt.Sprintf("%s-%s", lis.Name, r.depId[:8])
 	}
 	var serviceType string
 	if lis.IsPublic {
@@ -284,7 +306,7 @@ func (r *replicaSet) buildListenerService(lis *ReplicaSetConfig_Listener) (*core
 // buildAutoscaler generates a kubernetes horizontal pod autoscaler for a replica set.
 func (r *replicaSet) buildAutoscaler() (*autoscalingv2.HorizontalPodAutoscaler, error) {
 	// Per deployment name that is app version specific.
-	aname := name{r.app.Name, "hpa", r.name, r.depId[:8]}.DNSLabel()
+	aname := r.deploymentName()
 	depName := r.deploymentName()
 	return &autoscalingv2.HorizontalPodAutoscaler{
 		TypeMeta: metav1.TypeMeta{
