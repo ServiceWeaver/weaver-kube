@@ -502,13 +502,15 @@ func header(app *protos.AppConfig, cfg *KubeConfig, depId, filename string) (str
 #
 #     app: {{.App}}
 #     version: {{.Version}}
-#     components:
-      {{- range .Components}}
-#     - {{.}}
+#     components groups:
+      {{- range .Groups}}
+#     - {{range .}}
+#       - {{.}}
+		{{- end}}
       {{- end}}
 #     listeners:
       {{- range .Listeners}}
-#     - {{.}}
+#     - {{.Name}} ({{.Component}})
       {{- end}}
 #
 # This file contains the following resources:
@@ -532,6 +534,20 @@ func header(app *protos.AppConfig, cfg *KubeConfig, depId, filename string) (str
 
 `))
 
+	type listener struct {
+		Name      string
+		Component string
+	}
+
+	type content struct {
+		ToolVersion string
+		App         string
+		Version     string
+		Groups      [][]string
+		Listeners   []listener
+		Filename    string
+	}
+
 	// Extract the tool version.
 	toolVersion, _, err := ToolVersion()
 	if err != nil {
@@ -539,32 +555,34 @@ func header(app *protos.AppConfig, cfg *KubeConfig, depId, filename string) (str
 	}
 
 	// Extract components and listeners.
-	extracted, _, err := readBinary(app, cfg)
+	replicaSets, _, err := buildReplicaSets(app, depId, "", cfg)
 	if err != nil {
-		return "", nil
+		return "", err
 	}
-	var components []string
-	var listeners []string
-	for _, x := range extracted {
-		components = append(components, x.Name)
-		for _, listener := range x.Listeners {
-			listeners = append(listeners, listener.Name)
+	var groups [][]string
+	var listeners []listener
+	for _, rs := range replicaSets {
+		if rs == nil {
+			// TODO(mwhittaker): Debug why buildReplicaSets is returning nil
+			// replica sets.
+			continue
 		}
+		var group []string
+		for _, component := range rs.components {
+			group = append(group, component.Name)
+			for _, l := range component.Listeners {
+				listeners = append(listeners, listener{l.Name, component.Name})
+			}
+		}
+		groups = append(groups, group)
 	}
 
 	var b strings.Builder
-	header.Execute(&b, struct {
-		ToolVersion string
-		App         string
-		Version     string
-		Components  []string
-		Listeners   []string
-		Filename    string
-	}{
+	header.Execute(&b, content{
 		ToolVersion: toolVersion,
 		App:         app.Name,
 		Version:     depId[:8],
-		Components:  components,
+		Groups:      groups,
 		Listeners:   listeners,
 		Filename:    filename,
 	})
