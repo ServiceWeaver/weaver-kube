@@ -556,7 +556,7 @@ func header(app *protos.AppConfig, cfg *KubeConfig, depId, filename string) (str
 #
 # To view a description of every resource, run:
 #
-#     kubectl get all -o custom-columns=KIND:.kind,NAME:.metadata.name,APP:.metadata.labels.appName,VERSION:.metadata.labels.version,DESCRIPTION:.metadata.annotations.description
+#     kubectl get all -o custom-columns=KIND:.kind,NAME:.metadata.name,APP:.metadata.labels.serviceweaver/app,VERSION:.metadata.labels.serviceweaver/version,DESCRIPTION:.metadata.annotations.description
 #
 # To delete the resources, run:
 #
