@@ -546,6 +546,10 @@ func header(app *protos.AppConfig, cfg *KubeConfig, depId, filename string) (str
 #
 #     kubectl get all --selector=version={{.Version}}
 #
+# To view a description of every resource, run:
+#
+#     kubectl get all -o custom-columns=KIND:.kind,NAME:.metadata.name,APP:.metadata.labels.appName,VERSION:.metadata.labels.version,DESCRIPTION:.metadata.annotations.description
+#
 # To delete the resources, run:
 #
 #     kubectl delete all --selector=version={{.Version}}
