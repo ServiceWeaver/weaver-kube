@@ -57,17 +57,8 @@ const (
 	internalPort = 10000
 )
 
-var (
-	// Start value for ports used by the public and private listeners.
-	externalPort int32 = 20000
-
-	// Resource allocation units for "cpu" and "memory" resources.
-	//
-	// TODO(rgrandl): Should we allow the user to customize how many
-	// resources each pod starts with?
-	cpuUnit    = resource.MustParse("100m")
-	memoryUnit = resource.MustParse("128Mi")
-)
+// Start value for ports used by the public and private listeners.
+var externalPort int32 = 20000
 
 // replicaSet contains information about a replica set.
 type replicaSet struct {
@@ -96,6 +87,18 @@ type ListenerOptions struct {
 	// is reachable. If zero or not specified, the first available port
 	// is used.
 	Port int32
+}
+
+// resourceRequirements stores the resource requirements configuration for running pods.
+type resourceRequirements struct {
+	// Describes the minimum amount of CPU required to run the pod.
+	RequestsCPU string `toml:"requests_cpu"`
+	// Describes the minimum amount of memory required to run the pod.
+	RequestsMem string `toml:"requests_mem"`
+	// Describes the maximum amount of CPU allowed to run the pod.
+	LimitsCPU string `toml:"limits_cpu"`
+	// Describes the maximum amount of memory allowed to run the pod.
+	LimitsMem string `toml:"limits_mem"`
 }
 
 // KubeConfig stores the configuration information for one execution of a
@@ -174,6 +177,12 @@ type KubeConfig struct {
 	// [3] - https://grafana.com/oss/loki/
 	// [4] - https://grafana.com/
 	Observability map[string]string
+
+	// Resources needed to run the pods. Note that the resources should satisfy
+	// the format specified in [1].
+	//
+	// [1] https://pkg.go.dev/k8s.io/apimachinery/pkg/api/resource#example-MustParse.
+	Resources resourceRequirements
 }
 
 // shortenComponent shortens the given component name to be of the format
@@ -413,6 +422,11 @@ func (r *replicaSet) buildContainer(cfg *KubeConfig) (corev1.Container, error) {
 		})
 	}
 
+	resources, err := computeResourceRequirements(cfg.Resources)
+	if err != nil {
+		return corev1.Container{}, err
+	}
+
 	return corev1.Container{
 		Name:            appContainerName,
 		Image:           r.image,
@@ -421,23 +435,8 @@ func (r *replicaSet) buildContainer(cfg *KubeConfig) (corev1.Container, error) {
 		Env: []corev1.EnvVar{
 			{Name: kubeConfigEnvKey, Value: kubeCfgStr},
 		},
-		Resources: corev1.ResourceRequirements{
-			// NOTE: start with the smallest allowed limits, and count on autoscalers
-			// doing the rest.
-			//
-			// NOTE: if we don't specify the minimum amount of compute resources
-			// required, the autoscaler doesn't work properly, because the metric
-			// server is not able to report the resource usage of the container.
-			Requests: corev1.ResourceList{
-				"memory": memoryUnit,
-				"cpu":    cpuUnit,
-			},
-			// NOTE: we don't specify any limits, allowing all available node
-			// resources to be used, if needed. Note that in practice, we
-			// attach autoscalers to all of our containers, so the extra-usage
-			// should be only for a short period of time.
-		},
-		Ports: ports,
+		Resources: resources,
+		Ports:     ports,
 
 		// Enabling TTY and Stdin allows the user to run a shell inside the container,
 		// for debugging.
@@ -460,7 +459,7 @@ func (r *replicaSet) buildContainer(cfg *KubeConfig) (corev1.Container, error) {
 //     roll out a new application version.
 //
 //     For example, let's assume that we have an app v1 with two replica sets:
-//     `main` and `foo“, with `main` hosting a network listener. When we deploy
+//     `main` and `foo`, with `main` hosting a network listener. When we deploy
 //     v2 of the app, it will be rolled out as follows:
 //
 //     [main v1] [main v1]     [main v1] [main v2]     [main v2] [main v2]
@@ -808,7 +807,7 @@ func buildReplicaSets(app *protos.AppConfig, depId string, image string, cfg *Ku
 	nodes := map[graph.Node]struct{}{}
 	cg.PerNode(func(n graph.Node) {
 		pn := primary[n]
-		nodes[graph.Node(pn)] = struct{}{}
+		nodes[pn] = struct{}{}
 		if replicaSets[pn] == nil {
 			replicaSets[pn] = &replicaSet{
 				name:            components[pn].Name,
@@ -829,6 +828,49 @@ func buildReplicaSets(app *protos.AppConfig, depId string, image string, cfg *Ku
 		edges[graph.Edge{Src: src, Dst: dst}] = struct{}{}
 	})
 	return replicaSets, graph.NewAdjacencyGraph(maps.Keys(nodes), maps.Keys(edges)), nil
+}
+
+// computeResourceRequirements compute the resource requirements to run the application's pods.
+func computeResourceRequirements(req resourceRequirements) (corev1.ResourceRequirements, error) {
+	requests := corev1.ResourceList{}
+	limits := corev1.ResourceList{}
+
+	// Compute the resource requests.
+	if req.RequestsMem != "" {
+		reqsMem, err := resource.ParseQuantity(req.RequestsMem)
+		if err != nil {
+			return corev1.ResourceRequirements{}, fmt.Errorf("unable to parse requests_mem: %w", err)
+		}
+		requests[corev1.ResourceMemory] = reqsMem
+	}
+	if req.RequestsCPU != "" {
+		reqsCPU, err := resource.ParseQuantity(req.RequestsCPU)
+		if err != nil {
+			return corev1.ResourceRequirements{}, fmt.Errorf("unable to parse requests_cpu: %w", err)
+		}
+		requests[corev1.ResourceCPU] = reqsCPU
+	}
+
+	// Compute the resource limits.
+	if req.LimitsMem != "" {
+		limitsMem, err := resource.ParseQuantity(req.LimitsMem)
+		if err != nil {
+			return corev1.ResourceRequirements{}, fmt.Errorf("unable to parse limits_mem: %w", err)
+		}
+		limits[corev1.ResourceMemory] = limitsMem
+	}
+	if req.LimitsCPU != "" {
+		limitsCPU, err := resource.ParseQuantity(req.LimitsCPU)
+		if err != nil {
+			return corev1.ResourceRequirements{}, fmt.Errorf("unable to parse limits_cpu: %w", err)
+		}
+		limits[corev1.ResourceCPU] = limitsCPU
+	}
+
+	return corev1.ResourceRequirements{
+		Requests: requests,
+		Limits:   limits,
+	}, nil
 }
 
 // readBinary returns the component and listener information embedded in the

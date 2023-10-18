@@ -71,7 +71,61 @@ Container Image Names:
 
       - Docker Hub:                docker.io/USERNAME
       - Google Artifact Registry:  LOCATION-docker.pkg.dev/PROJECT-ID
-      - GitHub Container Registry: ghcr.io/NAMESPACE`,
+      - GitHub Container Registry: ghcr.io/NAMESPACE
+
+  You can set more advanced knobs in the "kube" section:
+    a) Namespace - where the application should be deployed.
+       namespace = "your_namespace"
+
+    b) Configure listeners
+      1. Whether your listener should be public, i.e., should it receive ingress
+         traffic from the public internet. If false, the listener is configured
+         only for cluster-internal access. To make a listener "foo" public you
+         should set:
+         listeners.foo = {public = true}
+      2. Whether you want your listener to listen on a particular port:
+         listeners.foo = {port = 1234}
+      3. Whether the listener service should have the same name across multiple
+         application versions:
+         listeners.foo = {service_name = "unique_name"}
+
+      You can specify any combination of the various options or none. E.g.,
+         listeners.foo = {public = true, serice_name = "unique_name"}
+
+    c) Observability - if nothing is specified, the kube deployer will
+       automatically launch Prometheus, Jaeger, Loki and Grafana to retrieve your
+       application's metrics, traces, logs, and to provide custom dashboards.
+
+       If you don't want one or more of these services to run, you can simply
+       disable them. E.g., :
+       [kube.observability]
+       prometheus_service = "none"
+       jaeger_service = "none"
+       loki_service = "none"
+       grafana_service = "none"
+
+       If you want to plugin one or more of your existing Prometheus, Jaeger,
+       Loki, Grafana, you can specify their service name:
+       [kube.observability]
+       prometheus_service = "your_prometheus_service_name"
+       jaeger_service = "your_jaeger_service_name"
+       loki_service = "your_loki_service_name"
+       grafana_service = "your_granfa_service_name"
+
+       Note that we support only the Prometheus, Jaeger, Loki, Grafana stack for
+       observability right now.
+
+    d) Configure resource requirements for the pods [1]. E.g.,
+      [kube.resources]
+      requests_cpu = "200m"
+      requests_mem = "256Mi"
+      limits_cpu = "400m"
+      limits_mem = "512Mi"
+
+      You can also specify any combination of the various options or none.
+
+      [1] https://kubernetes.io/docs/concepts/configuration/manage-resources-containers/
+`,
 		Flags: flags,
 		Fn:    deploy,
 	}
