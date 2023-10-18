@@ -132,6 +132,13 @@ type KubeConfig struct {
 	// the default namespace.
 	Namespace string
 
+	// If set, it specifies the service account [1] under which to run the pods.
+	// Otherwise, the application is being deployed using the default service
+	// account for your namespace.
+	//
+	// [1] https://kubernetes.io/docs/concepts/security/service-accounts/
+	ServiceAccount string `toml:"service_account"`
+
 	// If true, application listeners will use the underlying nodes' network.
 	// This behavior is generally discouraged, but it may be useful when running
 	// the application in a minikube environment, where using the underlying
@@ -271,9 +278,10 @@ func (r *replicaSet) buildDeployment(cfg *KubeConfig) (*appsv1.Deployment, error
 					},
 				},
 				Spec: corev1.PodSpec{
-					Containers:  []corev1.Container{container},
-					DNSPolicy:   dnsPolicy,
-					HostNetwork: cfg.UseHostNetwork,
+					ServiceAccountName: cfg.ServiceAccount,
+					Containers:         []corev1.Container{container},
+					DNSPolicy:          dnsPolicy,
+					HostNetwork:        cfg.UseHostNetwork,
 				},
 			},
 		},
@@ -485,7 +493,7 @@ func GenerateYAMLs(image string, app *protos.AppConfig, depId string, cfg *KubeC
 	generated = append(generated, []byte(header)...)
 
 	// Generate roles and role bindings.
-	content, err := generateRolesAndBindings(cfg.Namespace)
+	content, err := generateRolesAndBindings(cfg.Namespace, cfg.ServiceAccount)
 	if err != nil {
 		return fmt.Errorf("unable to generate roles and bindings: %w", err)
 	}
@@ -619,8 +627,8 @@ func header(app *protos.AppConfig, cfg *KubeConfig, depId, filename string) (str
 }
 
 // generateRolesAndBindings generates Kubernetes roles and role bindings in
-// namespace that grant permissions to the appropriate service accounts.
-func generateRolesAndBindings(namespace string) ([]byte, error) {
+// a given namespace that grant permissions to the appropriate service accounts.
+func generateRolesAndBindings(namespace string, serviceAccount string) ([]byte, error) {
 	// Grant the default service account the permission to get, list, and watch
 	// pods. The babysitter watches pods to generate routing info.
 	//
@@ -663,7 +671,7 @@ func generateRolesAndBindings(namespace string) ([]byte, error) {
 		Subjects: []rbacv1.Subject{
 			{
 				Kind:      "ServiceAccount",
-				Name:      "default",
+				Name:      serviceAccount,
 				Namespace: namespace,
 			},
 		},
