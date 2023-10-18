@@ -677,6 +677,25 @@ func generateCoreYAMLs(app *protos.AppConfig, depId string, cfg *KubeConfig, ima
 	for _, n := range graph.ReversePostOrder(rg) {
 		rs := replicaSets[n]
 
+		// Build a service for each listener.
+		for _, listeners := range rs.components {
+			for _, lis := range listeners.Listeners {
+				ls, err := rs.buildListenerService(lis)
+				if err != nil {
+					return nil, fmt.Errorf("unable to create kube listener service for %s: %w", lis.Name, err)
+				}
+				content, err := yaml.Marshal(ls)
+				if err != nil {
+					return nil, err
+				}
+				generated = append(generated, []byte(fmt.Sprintf("\n# Listener Service for replica set %s\n", rs.name))...)
+				generated = append(generated, content...)
+				generated = append(generated, []byte("\n---\n")...)
+				fmt.Fprintf(os.Stderr, "Generated kube listener service for listener %v\n", lis.Name)
+			}
+		}
+		generated = append(generated, []byte("\n")...)
+
 		// Build a deployment.
 		d, err := rs.buildDeployment(cfg)
 		if err != nil {
@@ -704,25 +723,6 @@ func generateCoreYAMLs(app *protos.AppConfig, depId string, cfg *KubeConfig, ima
 		generated = append(generated, content...)
 		generated = append(generated, []byte("\n---\n")...)
 		fmt.Fprintf(os.Stderr, "Generated kube autoscaler for replica set %v\n", rs.name)
-
-		// Build a service for each listener.
-		for _, listeners := range rs.components {
-			for _, lis := range listeners.Listeners {
-				ls, err := rs.buildListenerService(lis)
-				if err != nil {
-					return nil, fmt.Errorf("unable to create kube listener service for %s: %w", lis.Name, err)
-				}
-				content, err = yaml.Marshal(ls)
-				if err != nil {
-					return nil, err
-				}
-				generated = append(generated, []byte(fmt.Sprintf("\n# Listener Service for replica set %s\n", rs.name))...)
-				generated = append(generated, content...)
-				generated = append(generated, []byte("\n---\n")...)
-				fmt.Fprintf(os.Stderr, "Generated kube listener service for listener %v\n", lis.Name)
-			}
-		}
-		generated = append(generated, []byte("\n")...)
 	}
 	return generated, nil
 }
