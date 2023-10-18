@@ -209,10 +209,11 @@ func (r *replicaSet) deploymentName() string {
 // calls foo.
 func (r *replicaSet) buildDeployment(cfg *KubeConfig) (*appsv1.Deployment, error) {
 	name := r.deploymentName()
-	matchLabels := map[string]string{"depName": name}
+	matchLabels := map[string]string{"serviceweaver/name": name}
 	podLabels := map[string]string{
-		"appName": r.app.Name,
-		"depName": name,
+		"serviceweaver/name":    name,
+		"serviceweaver/app":     r.app.Name,
+		"serviceweaver/version": r.depId[:8],
 	}
 	if cfg.Observability[metricsConfigKey] != disabled {
 		podLabels["metrics"] = r.app.Name // Needed by Prometheus to scrape the metrics.
@@ -240,7 +241,10 @@ func (r *replicaSet) buildDeployment(cfg *KubeConfig) (*appsv1.Deployment, error
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      name,
 			Namespace: r.namespace,
-			Labels:    map[string]string{"version": r.depId[:8]},
+			Labels: map[string]string{
+				"serviceweaver/app":     r.app.Name,
+				"serviceweaver/version": r.depId[:8],
+			},
 			Annotations: map[string]string{
 				"description": fmt.Sprintf("This Deployment hosts components %v.", strings.Join(components, ", ")),
 			},
@@ -296,8 +300,9 @@ func (r *replicaSet) buildListenerService(lis *ReplicaSetConfig_Listener) (*core
 			Name:      lisServiceName,
 			Namespace: r.namespace,
 			Labels: map[string]string{
-				"lisName": lis.Name,
-				"version": r.depId[:8],
+				"serviceweaver/app":      r.app.Name,
+				"serviceweaver/listener": lis.Name,
+				"serviceweaver/version":  r.depId[:8],
 			},
 			Annotations: map[string]string{
 				"description": fmt.Sprintf("This Service forwards traffic to the %q listener.", lis.Name),
@@ -306,7 +311,7 @@ func (r *replicaSet) buildListenerService(lis *ReplicaSetConfig_Listener) (*core
 		Spec: corev1.ServiceSpec{
 			Type: corev1.ServiceType(serviceType),
 			Selector: map[string]string{
-				"depName": r.deploymentName(),
+				"serviceweaver/name": r.deploymentName(),
 			},
 			Ports: []corev1.ServicePort{
 				{
@@ -332,7 +337,10 @@ func (r *replicaSet) buildAutoscaler() (*autoscalingv2.HorizontalPodAutoscaler, 
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      aname,
 			Namespace: r.namespace,
-			Labels:    map[string]string{"version": r.depId[:8]},
+			Labels: map[string]string{
+				"serviceweaver/app":     r.app.Name,
+				"serviceweaver/version": r.depId[:8],
+			},
 			Annotations: map[string]string{
 				"description": fmt.Sprintf("This HorizontalPodAutoscaler scales the %q Deployment.", depName),
 			},
@@ -548,7 +556,7 @@ func header(app *protos.AppConfig, cfg *KubeConfig, depId, filename string) (str
 #
 # To view a description of every resource, run:
 #
-#     kubectl get all -o custom-columns=KIND:.kind,NAME:.metadata.name,APP:.metadata.labels.appName,VERSION:.metadata.labels.version,DESCRIPTION:.metadata.annotations.description
+#     kubectl get all -o custom-columns=KIND:.kind,NAME:.metadata.name,APP:.metadata.labels.serviceweaver/app,VERSION:.metadata.labels.serviceweaver/version,DESCRIPTION:.metadata.annotations.description
 #
 # To delete the resources, run:
 #

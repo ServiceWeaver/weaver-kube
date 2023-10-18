@@ -39,13 +39,13 @@ jobs:
 
     - name: Check out the repository
       uses: actions/checkout@v3
-    
+
     - name: Set up Go
       uses: actions/setup-go@v4
       with:
         go-version: 'stable'
         cache: true
- 
+
     - name: Setup kubectl.
       uses: azure/setup-kubectl@v3
 
@@ -61,7 +61,7 @@ jobs:
 
     - name: Build echo example.
       run: cd examples/echo; go build .
-    
+
     - name: Generate app config file
       run: |
         CONFIG=$(cat << EOF
@@ -80,13 +80,13 @@ jobs:
         WEAVER_YAML=$(./cmd/weaver-kube/weaver-kube deploy ${{ env.CONFIG_FILE }})
         echo "Generated YAML file:" $WEAVER_YAML
         echo "WEAVER_YAML=$WEAVER_YAML" >> $GITHUB_ENV
-    
+
     - name: Deploy the application
       run: kubectl apply -f ${{env.WEAVER_YAML}}
 
     - name: Get the name of the echo listener service
       run: |
-        NAME=$(timeout ${{ env.WAIT_TIMEOUT }} /bin/sh -c 'while true; do NAME=$(kubectl get service -l lisName=echo -o jsonpath={.items[].metadata.name}) && echo $NAME && break; sleep 2; done')
+        NAME=$(timeout ${{ env.WAIT_TIMEOUT }} /bin/sh -c 'while true; do NAME=$(kubectl get service -l serviceweaver/listener=echo -o jsonpath={.items[].metadata.name}) && echo $NAME && break; sleep 2; done')
         echo "SERVICE_NAME=$NAME" >> $GITHUB_ENV
 
     - name: Call the echo endpoint until it succeeds
@@ -98,6 +98,6 @@ jobs:
       run: |
         kubectl get all
         kubectl describe pod
-        kubectl logs -l appName=echo
-  
-  
+        kubectl logs -l serviceweaver/app=echo
+
+

@@ -223,7 +223,7 @@ func (b *babysitter) watchPods(ctx context.Context, component string) error {
 	// Watch the pods running the requested component.
 	rs := replicaSetName(component, b.cfg.App)
 	name := deploymentName(b.cfg.App.Name, rs, b.cfg.DepId)
-	opts := metav1.ListOptions{LabelSelector: fmt.Sprintf("depName=%s", name)}
+	opts := metav1.ListOptions{LabelSelector: fmt.Sprintf("serviceweaver/name=%s", name)}
 	watcher, err := b.clientset.CoreV1().Pods(b.cfg.Namespace).Watch(ctx, opts)
 	if err != nil {
 		return fmt.Errorf("watch pods for component %s: %w", component, err)
