@@ -26,6 +26,7 @@ import (
 	"github.com/ServiceWeaver/weaver-kube/internal/proto"
 	"github.com/ServiceWeaver/weaver/runtime/bin"
 	"github.com/ServiceWeaver/weaver/runtime/graph"
+	"github.com/ServiceWeaver/weaver/runtime/logging"
 	"github.com/ServiceWeaver/weaver/runtime/protos"
 	"golang.org/x/exp/maps"
 	appsv1 "k8s.io/api/apps/v1"
@@ -222,6 +223,11 @@ func (r *replicaSet) buildDeployment(cfg *KubeConfig) (*appsv1.Deployment, error
 		dnsPolicy = corev1.DNSClusterFirstWithHostNet
 	}
 
+	var components []string
+	for _, component := range r.components {
+		components = append(components, logging.ShortenComponent(component.Name))
+	}
+
 	container, err := r.buildContainer(cfg)
 	if err != nil {
 		return nil, err
@@ -235,6 +241,9 @@ func (r *replicaSet) buildDeployment(cfg *KubeConfig) (*appsv1.Deployment, error
 			Name:      name,
 			Namespace: r.namespace,
 			Labels:    map[string]string{"version": r.depId[:8]},
+			Annotations: map[string]string{
+				"description": fmt.Sprintf("This Deployment hosts components %v.", strings.Join(components, ", ")),
+			},
 		},
 		Spec: appsv1.DeploymentSpec{
 			Selector: &metav1.LabelSelector{
@@ -244,6 +253,9 @@ func (r *replicaSet) buildDeployment(cfg *KubeConfig) (*appsv1.Deployment, error
 				ObjectMeta: metav1.ObjectMeta{
 					Labels:    podLabels,
 					Namespace: r.namespace,
+					Annotations: map[string]string{
+						"description": fmt.Sprintf("This Pod hosts components %v.", strings.Join(components, ", ")),
+					},
 				},
 				Spec: corev1.PodSpec{
 					Containers:  []corev1.Container{container},
@@ -287,6 +299,9 @@ func (r *replicaSet) buildListenerService(lis *ReplicaSetConfig_Listener) (*core
 				"lisName": lis.Name,
 				"version": r.depId[:8],
 			},
+			Annotations: map[string]string{
+				"description": fmt.Sprintf("This Service forwards traffic to the %q listener.", lis.Name),
+			},
 		},
 		Spec: corev1.ServiceSpec{
 			Type: corev1.ServiceType(serviceType),
@@ -318,6 +333,9 @@ func (r *replicaSet) buildAutoscaler() (*autoscalingv2.HorizontalPodAutoscaler, 
 			Name:      aname,
 			Namespace: r.namespace,
 			Labels:    map[string]string{"version": r.depId[:8]},
+			Annotations: map[string]string{
+				"description": fmt.Sprintf("This HorizontalPodAutoscaler scales the %q Deployment.", depName),
+			},
 		},
 		Spec: autoscalingv2.HorizontalPodAutoscalerSpec{
 			ScaleTargetRef: autoscalingv2.CrossVersionObjectReference{
@@ -527,6 +545,10 @@ func header(app *protos.AppConfig, cfg *KubeConfig, depId, filename string) (str
 # To view the deployed resources, run:
 #
 #     kubectl get all --selector=version={{.Version}}
+#
+# To view a description of every resource, run:
+#
+#     kubectl get all -o custom-columns=KIND:.kind,NAME:.metadata.name,APP:.metadata.labels.appName,VERSION:.metadata.labels.version,DESCRIPTION:.metadata.annotations.description
 #
 # To delete the resources, run:
 #
