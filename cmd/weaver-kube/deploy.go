@@ -77,6 +77,10 @@ Container Image Names:
     a) Namespace - where the application should be deployed.
        namespace = "your_namespace"
 
+    b) Service account - specify the service account to use when running your
+       application pods.
+       service_account = "your_service_account""
+
     b) Configure listeners
       1. Whether your listener should be public, i.e., should it receive ingress
          traffic from the public internet. If false, the listener is configured
@@ -170,6 +174,10 @@ func deploy(ctx context.Context, args []string) error {
 	if config.Namespace == "" {
 		config.Namespace = "default"
 	}
+	if config.ServiceAccount == "" {
+		config.ServiceAccount = "default"
+	}
+
 	binListeners, err := bin.ReadListeners(app.Binary)
 	if err != nil {
 		return fmt.Errorf("cannot read listeners from binary %s: %w", app.Binary, err)
