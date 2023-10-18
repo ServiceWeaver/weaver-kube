@@ -390,7 +390,6 @@ func (r *replicaSet) buildContainer(cfg *KubeConfig) (corev1.Container, error) {
 		Name:            r.name,
 		DepId:           r.depId,
 		App:             r.app,
-		InternalPort:    int32(r.internalPort),
 		TraceServiceUrl: r.traceServiceURL,
 		Components:      r.components,
 	})

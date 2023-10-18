@@ -26,7 +26,6 @@ message ReplicaSetConfig {
   string name = 2;
   string dep_id = 3;
   runtime.AppConfig app = 4;
-  int32 internal_port = 5;
   string trace_service_url = 6;
 
   // Components hosted by the replica sets, and their network listeners.
