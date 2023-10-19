@@ -17,6 +17,7 @@ package impl
 import (
 	_ "embed"
 	"fmt"
+	"io"
 	"os"
 	"time"
 
@@ -151,33 +152,24 @@ var dashboardContent string
 
 // generateObservabilityYAMLs generates Kubernetes YAMLs for exporting
 // applications' metrics, logs, and traces.
-func generateObservabilityYAMLs(appName string, cfg *kubeConfig) ([]byte, error) {
-	configs, err := generateConfigsToExportTraces(appName, cfg)
-	if err != nil {
-		return nil, fmt.Errorf("unable to create kube configs to export traces: %w", err)
+func generateObservabilityYAMLs(w io.Writer, appName string, cfg *kubeConfig) error {
+	if err := generateConfigsToExportTraces(w, appName, cfg); err != nil {
+		return fmt.Errorf("unable to create kube configs to export traces: %w", err)
 	}
-	var generated []byte
-	generated = append(generated, configs...)
 
-	configs, err = generateConfigsToExportMetrics(appName, cfg)
-	if err != nil {
-		return nil, fmt.Errorf("unable to create kube configs to export metrics: %w", err)
+	if err := generateConfigsToExportMetrics(w, appName, cfg); err != nil {
+		return fmt.Errorf("unable to create kube configs to export metrics: %w", err)
 	}
-	generated = append(generated, configs...)
 
-	configs, err = generateConfigsToExportLogs(appName, cfg)
-	if err != nil {
-		return nil, fmt.Errorf("unable to create kube configs to export logs: %w", err)
+	if err := generateConfigsToExportLogs(w, appName, cfg); err != nil {
+		return fmt.Errorf("unable to create kube configs to export logs: %w", err)
 	}
-	generated = append(generated, configs...)
 
 	// Generate Kubernetes configs to export logs, traces and metrics to Grafana.
-	configs, err = generateConfigsToExportToGrafana(appName, cfg)
-	if err != nil {
-		return nil, fmt.Errorf("unable to create kube configs to export data to Grafana: %w", err)
+	if err := generateConfigsToExportToGrafana(w, appName, cfg); err != nil {
+		return fmt.Errorf("unable to create kube configs to export data to Grafana: %w", err)
 	}
-	generated = append(generated, configs...)
-	return generated, nil
+	return nil
 }
 
 // generateConfigsToExportTraces generates Jaeger Kubernetes deployment
@@ -208,10 +200,10 @@ func generateObservabilityYAMLs(appName string, cfg *kubeConfig) ([]byte, error)
 // observability = {jaeger_service = "jaeger-all-in-one"}
 //
 // [1] https://helm.sh/
-func generateConfigsToExportTraces(appName string, cfg *kubeConfig) ([]byte, error) {
+func generateConfigsToExportTraces(w io.Writer, appName string, cfg *kubeConfig) error {
 	// The user disabled exporting the traces, don't generate anything.
 	if cfg.Observability[tracesConfigKey] != auto {
-		return nil, nil
+		return nil
 	}
 
 	jname := name{appName, jaegerAppName}.DNSLabel()
@@ -256,14 +248,9 @@ func generateConfigsToExportTraces(appName string, cfg *kubeConfig) ([]byte, err
 			},
 		},
 	}
-	content, err := yaml.Marshal(d)
-	if err != nil {
-		return nil, err
+	if err := marshalResource(w, d, "Jaegar Deployment"); err != nil {
+		return err
 	}
-	var generated []byte
-	generated = append(generated, []byte("# Jaeger Deployment\n")...)
-	generated = append(generated, content...)
-	generated = append(generated, []byte("\n---\n")...)
 	fmt.Fprintf(os.Stderr, "Generated Jaeger deployment\n")
 
 	// Generate the Jaeger service.
@@ -294,16 +281,11 @@ func generateConfigsToExportTraces(appName string, cfg *kubeConfig) ([]byte, err
 			},
 		},
 	}
-	content, err = yaml.Marshal(s)
-	if err != nil {
-		return nil, err
+	if err := marshalResource(w, s, "Jaegar Service"); err != nil {
+		return err
 	}
-	generated = append(generated, []byte("\n# Jaeger Service\n")...)
-	generated = append(generated, content...)
-	generated = append(generated, []byte("\n---\n")...)
 	fmt.Fprintf(os.Stderr, "Generated Jaeger service\n")
-
-	return generated, nil
+	return nil
 }
 
 // generateConfigsToExportMetrics generates the Prometheus kubernetes deployment
@@ -354,34 +336,28 @@ func generateConfigsToExportTraces(appName string, cfg *kubeConfig) ([]byte, err
 // observability = {prometheus_service = "prometheus-server"}
 //
 // [1] https://helm.sh/
-func generateConfigsToExportMetrics(appName string, cfg *kubeConfig) ([]byte, error) {
+func generateConfigsToExportMetrics(w io.Writer, appName string, cfg *kubeConfig) error {
 	// The user disabled exporting the metrics, don't generate anything.
 	if cfg.Observability[metricsConfigKey] == disabled {
-		return nil, nil
+		return nil
 	}
 
 	// Generate configs to configure Prometheus to scrape metrics from the app.
-	var generated []byte
-	content, err := generatePrometheusConfigs(appName, cfg)
-	if err != nil {
-		return nil, err
+	if err := generatePrometheusConfigs(w, appName, cfg); err != nil {
+		return err
 	}
-	generated = append(generated, content...)
 
 	// Generate the Prometheus kubernetes deployment info iff the kube deployer
 	// should automatically start the Prometheus service.
 	if cfg.Observability[metricsConfigKey] != auto {
-		return generated, nil
+		return nil
 	}
 
 	// Generate kubernetes service configs for Prometheus.
-	content, err = generatePrometheusServiceConfigs(appName, cfg)
-	if err != nil {
-		return nil, err
+	if err := generatePrometheusServiceConfigs(w, appName, cfg); err != nil {
+		return err
 	}
-	generated = append(generated, content...)
-
-	return generated, nil
+	return nil
 }
 
 // generatePrometheusConfigs generate configs needed by the Prometheus service
@@ -389,7 +365,7 @@ func generateConfigsToExportMetrics(appName string, cfg *kubeConfig) ([]byte, er
 //
 // Note that these configs are needed by both the automatically started Prometheus
 // service and the one started by the user.
-func generatePrometheusConfigs(appName string, cfg *kubeConfig) ([]byte, error) {
+func generatePrometheusConfigs(w io.Writer, appName string, cfg *kubeConfig) error {
 	cname := name{appName, "prometheus", "config"}.DNSLabel()
 	pname := name{appName, "prometheus"}.DNSLabel()
 
@@ -431,17 +407,11 @@ scrape_configs:
 			"prometheus.yaml": config,
 		},
 	}
-	content, err := yaml.Marshal(cm)
-	if err != nil {
-		return nil, err
+	if err := marshalResource(w, cm, fmt.Sprintf("Config Map %s", cname)); err != nil {
+		return err
 	}
-	var generated []byte
-	generated = append(generated, []byte(fmt.Sprintf("\n# Config Map %s\n", cname))...)
-	generated = append(generated, content...)
-	generated = append(generated, []byte("\n---\n")...)
 	fmt.Fprintf(os.Stderr, "Generated kube deployment for config map %s\n", cname)
-
-	return generated, nil
+	return nil
 }
 
 // generatePrometheusServiceConfigs generates the Prometheus kubernetes
@@ -452,7 +422,7 @@ scrape_configs:
 //
 // TODO(rgrandl): We run a single instance of Prometheus for now. We might want
 // to scale it up if it becomes a bottleneck.
-func generatePrometheusServiceConfigs(appName string, cfg *kubeConfig) ([]byte, error) {
+func generatePrometheusServiceConfigs(w io.Writer, appName string, cfg *kubeConfig) error {
 	cname := name{appName, "prometheus", "config"}.DNSLabel()
 	pname := name{appName, "prometheus"}.DNSLabel()
 
@@ -529,15 +499,9 @@ func generatePrometheusServiceConfigs(appName string, cfg *kubeConfig) ([]byte, 
 			},
 		},
 	}
-	content, err := yaml.Marshal(d)
-	if err != nil {
-		return nil, err
+	if err := marshalResource(w, d, fmt.Sprintf("Prometheus Deployment %s", pname)); err != nil {
+		return err
 	}
-
-	var generated []byte
-	generated = append(generated, []byte(fmt.Sprintf("\n# Prometheus Deployment %s\n", pname))...)
-	generated = append(generated, content...)
-	generated = append(generated, []byte("\n---\n")...)
 	fmt.Fprintf(os.Stderr, "Generated kube deployment for Prometheus %s\n", pname)
 
 	// Build the kubernetes Prometheus service.
@@ -561,16 +525,11 @@ func generatePrometheusServiceConfigs(appName string, cfg *kubeConfig) ([]byte, 
 			},
 		},
 	}
-	content, err = yaml.Marshal(s)
-	if err != nil {
-		return nil, err
+	if err := marshalResource(w, s, fmt.Sprintf("Prometheus Service %s", pname)); err != nil {
+		return err
 	}
-	generated = append(generated, []byte(fmt.Sprintf("\n# Prometheus Service %s\n", pname))...)
-	generated = append(generated, content...)
-	generated = append(generated, []byte("\n---\n")...)
 	fmt.Fprintf(os.Stderr, "Generated kube service for Prometheus %s\n", pname)
-
-	return generated, nil
+	return nil
 }
 
 // generateConfigsToExportLogs generates the Loki/Promtail kubernetes deployment
@@ -630,46 +589,34 @@ func generatePrometheusServiceConfigs(appName string, cfg *kubeConfig) ([]byte, 
 //	it will automatically add your Loki service as a datasource.
 //
 // [1] https://helm.sh/
-func generateConfigsToExportLogs(appName string, cfg *kubeConfig) ([]byte, error) {
+func generateConfigsToExportLogs(w io.Writer, appName string, cfg *kubeConfig) error {
 	// The user disabled exporting the logs, don't generate anything.
 	if cfg.Observability[logsConfigKey] == disabled {
-		return nil, nil
+		return nil
 	}
 
 	// Generate configs to configure Loki/Promtail.
-	var generated []byte
-	content, err := generateLokiConfigs(appName, cfg)
-	if err != nil {
-		return nil, err
+	if err := generateLokiConfigs(w, appName, cfg); err != nil {
+		return err
 	}
-	generated = append(generated, content...)
-
-	content, err = generatePromtailConfigs(appName, cfg)
-	if err != nil {
-		return nil, err
+	if err := generatePromtailConfigs(w, appName, cfg); err != nil {
+		return err
 	}
-	generated = append(generated, content...)
 
 	// Generate the Loki/Promtail kubernetes deployment configs iff the kube deployer
 	// should deploy the Loki/Promtail.
 	if cfg.Observability[logsConfigKey] != auto {
-		return generated, nil
+		return nil
 	}
 
 	// Generate kubernetes service configs for Loki/Promtail.
-	content, err = generateLokiServiceConfigs(appName, cfg)
-	if err != nil {
-		return nil, err
+	if err := generateLokiServiceConfigs(w, appName, cfg); err != nil {
+		return err
 	}
-	generated = append(generated, content...)
-
-	content, err = generatePromtailAgentConfigs(appName, cfg)
-	if err != nil {
-		return nil, err
+	if err := generatePromtailAgentConfigs(w, appName, cfg); err != nil {
+		return err
 	}
-	generated = append(generated, content...)
-
-	return generated, nil
+	return nil
 }
 
 // generateLokiConfigs generate configs needed by a Loki service to
@@ -679,7 +626,7 @@ func generateConfigsToExportLogs(appName string, cfg *kubeConfig) ([]byte, error
 // service and the one started by the user.
 //
 // TODO(rgrandl): check if we can simplify the configurations.
-func generateLokiConfigs(appName string, cfg *kubeConfig) ([]byte, error) {
+func generateLokiConfigs(w io.Writer, appName string, cfg *kubeConfig) error {
 	cname := name{appName, "loki", "config"}.DNSLabel()
 	lname := name{appName, "loki"}.DNSLabel()
 
@@ -739,18 +686,11 @@ schema_config:
 			"loki.yaml": config,
 		},
 	}
-	content, err := yaml.Marshal(cm)
-	if err != nil {
-		return nil, err
+	if err := marshalResource(w, cm, fmt.Sprintf("Grafana Service %s", cname)); err != nil {
+		return err
 	}
-
-	var generated []byte
-	generated = append(generated, []byte(fmt.Sprintf("\n# Config Map %s\n", cname))...)
-	generated = append(generated, content...)
-	generated = append(generated, []byte("\n---\n")...)
 	fmt.Fprintf(os.Stderr, "Generated kube deployment for config map %s\n", cname)
-
-	return generated, nil
+	return nil
 }
 
 // generatePromtailConfigs generates configuration needed to enable Promtail
@@ -760,7 +700,7 @@ schema_config:
 // agent and the one started by the user.
 //
 // TODO(rgrandl): check if we can simplify the configurations.
-func generatePromtailConfigs(appName string, cfg *kubeConfig) ([]byte, error) {
+func generatePromtailConfigs(w io.Writer, appName string, cfg *kubeConfig) error {
 	promName := name{appName, "promtail"}.DNSLabel()
 
 	var lokiURL string
@@ -837,18 +777,11 @@ scrape_configs:
 			"promtail.yaml": config,
 		},
 	}
-	content, err := yaml.Marshal(cm)
-	if err != nil {
-		return nil, err
+	if err := marshalResource(w, cm, fmt.Sprintf("Config Map %s", cm.Name)); err != nil {
+		return err
 	}
-
-	var generated []byte
-	generated = append(generated, []byte(fmt.Sprintf("\n# Config Map %s\n", cm.Name))...)
-	generated = append(generated, content...)
-	generated = append(generated, []byte("\n---\n")...)
 	fmt.Fprintf(os.Stderr, "Generated kube deployment for config map %s\n", cm.Name)
-
-	return generated, nil
+	return nil
 }
 
 // generateLokiServiceConfigs generates the Loki kubernetes service information
@@ -859,7 +792,7 @@ scrape_configs:
 //
 // TODO(rgrandl): We run a single instance of Loki for now. We might want to
 // scale it up if it becomes a bottleneck.
-func generateLokiServiceConfigs(appName string, cfg *kubeConfig) ([]byte, error) {
+func generateLokiServiceConfigs(w io.Writer, appName string, cfg *kubeConfig) error {
 	// Build the kubernetes Loki deployment.
 	cname := name{appName, "loki", "config"}.DNSLabel()
 	lname := name{appName, "loki"}.DNSLabel()
@@ -927,15 +860,9 @@ func generateLokiServiceConfigs(appName string, cfg *kubeConfig) ([]byte, error)
 			},
 		},
 	}
-	content, err := yaml.Marshal(d)
-	if err != nil {
-		return nil, err
+	if err := marshalResource(w, d, fmt.Sprintf("Loki Deployment %s", lname)); err != nil {
+		return err
 	}
-
-	var generated []byte
-	generated = append(generated, []byte(fmt.Sprintf("\n# Loki Deployment %s\n", lname))...)
-	generated = append(generated, content...)
-	generated = append(generated, []byte("\n---\n")...)
 	fmt.Fprintf(os.Stderr, "Generated kube deployment for Loki %s\n", lname)
 
 	// Build the kubernetes Loki service.
@@ -959,16 +886,11 @@ func generateLokiServiceConfigs(appName string, cfg *kubeConfig) ([]byte, error)
 			},
 		},
 	}
-	content, err = yaml.Marshal(s)
-	if err != nil {
-		return nil, err
+	if err := marshalResource(w, s, fmt.Sprintf("Loki Service %s", lname)); err != nil {
+		return err
 	}
-	generated = append(generated, []byte(fmt.Sprintf("\n# Loki Service %s\n", lname))...)
-	generated = append(generated, content...)
-	generated = append(generated, []byte("\n---\n")...)
 	fmt.Fprintf(os.Stderr, "Generated kube service for Loki %s\n", lname)
-
-	return generated, nil
+	return nil
 }
 
 // generatePromtailAgentConfigs generates the Promtail kubernetes configs
@@ -976,7 +898,7 @@ func generateLokiServiceConfigs(appName string, cfg *kubeConfig) ([]byte, error)
 //
 // Note that the configs should be generated iff the kube deployer automatically
 // runs Promtail along with the app.
-func generatePromtailAgentConfigs(appName string, cfg *kubeConfig) ([]byte, error) {
+func generatePromtailAgentConfigs(w io.Writer, appName string, cfg *kubeConfig) error {
 	// Create a Promtail daemonset that will run on each node. The daemonset will
 	// run in order to scrape the pods running on each node.
 	promName := name{appName, "promtail"}.DNSLabel()
@@ -1095,18 +1017,11 @@ func generatePromtailAgentConfigs(appName string, cfg *kubeConfig) ([]byte, erro
 			},
 		},
 	}
-	content, err := yaml.Marshal(dset)
-	if err != nil {
-		return nil, err
+	if err := marshalResource(w, dset, fmt.Sprintf("Promtail DaemonSet %s", promName)); err != nil {
+		return err
 	}
-
-	var generated []byte
-	generated = append(generated, []byte(fmt.Sprintf("\n# Promtail DaemonSet %s\n", promName))...)
-	generated = append(generated, content...)
-	generated = append(generated, []byte("\n---\n")...)
 	fmt.Fprintf(os.Stderr, "Generated kube daemonset for Promtail %s\n", promName)
-
-	return generated, nil
+	return nil
 }
 
 // generateConfigsToExportToGrafana generates the Grafana kubernetes deployment
@@ -1141,41 +1056,35 @@ func generatePromtailAgentConfigs(appName string, cfg *kubeConfig) ([]byte, erro
 // the configured datasources.
 //
 // [1] https://helm.sh/
-func generateConfigsToExportToGrafana(appName string, cfg *kubeConfig) ([]byte, error) {
+func generateConfigsToExportToGrafana(w io.Writer, appName string, cfg *kubeConfig) error {
 	// The user disabled Grafana, don't generate anything.
 	if cfg.Observability[grafanaConfigKey] == disabled {
-		return nil, nil
+		return nil
 	}
 
 	// Generate configs needed to configure Grafana.
-	var generated []byte
-	content, err := generateGrafanaConfigs(appName, cfg)
-	if err != nil {
-		return nil, err
+	if err := generateGrafanaConfigs(w, appName, cfg); err != nil {
+		return err
 	}
-	generated = append(generated, content...)
 
 	// Generate the Grafana kubernetes deployment info iff the kube deployer should
 	// deploy the Grafana service.
 	if cfg.Observability[grafanaConfigKey] != auto {
-		return generated, nil
+		return nil
 	}
 
 	// Generate kubernetes service configs needed to run Grafana.
-	content, err = generateGrafanaServiceConfigs(appName, cfg)
-	if err != nil {
-		return nil, err
+	if err := generateGrafanaServiceConfigs(w, appName, cfg); err != nil {
+		return err
 	}
-	generated = append(generated, content...)
-
-	return generated, nil
+	return nil
 }
 
 // generateGrafanaConfigs generate configs needed by the Grafana service
 // to manipulate various datasources and to export dashboards.
 //
 // TODO(rgrandl): check if we can simplify the configurations.
-func generateGrafanaConfigs(appName string, cfg *kubeConfig) ([]byte, error) {
+func generateGrafanaConfigs(w io.Writer, appName string, cfg *kubeConfig) error {
 	cname := name{appName, "grafana", "config"}.DNSLabel()
 
 	// Build the config map that holds the Grafana configuration file. In the
@@ -1295,17 +1204,11 @@ providers:
 			"default-dashboard.json": fmt.Sprintf(dashboardContent, appName),
 		},
 	}
-	content, err := yaml.Marshal(cm)
-	if err != nil {
-		return nil, err
+	if err := marshalResource(w, cm, fmt.Sprintf("Config Map %s", cname)); err != nil {
+		return err
 	}
-	var generated []byte
-	generated = append(generated, []byte(fmt.Sprintf("\n# Config Map %s\n", cname))...)
-	generated = append(generated, content...)
-	generated = append(generated, []byte("\n---\n")...)
 	fmt.Fprintf(os.Stderr, "Generated kube deployment for config map %s\n", cname)
-
-	return generated, nil
+	return nil
 }
 
 // generateGrafanaServiceConfigs generates the kubernetes configurations to deploy
@@ -1316,7 +1219,7 @@ providers:
 //
 // TODO(rgrandl): We run a single instance of Grafana for now. We might want
 // to scale it up if it becomes a bottleneck.
-func generateGrafanaServiceConfigs(appName string, cfg *kubeConfig) ([]byte, error) {
+func generateGrafanaServiceConfigs(w io.Writer, appName string, cfg *kubeConfig) error {
 	cname := name{appName, "grafana", "config"}.DNSLabel()
 	gname := name{appName, "grafana"}.DNSLabel()
 
@@ -1442,15 +1345,9 @@ func generateGrafanaServiceConfigs(appName string, cfg *kubeConfig) ([]byte, err
 			},
 		},
 	}
-	content, err := yaml.Marshal(d)
-	if err != nil {
-		return nil, err
+	if err := marshalResource(w, d, "Grafana Deployment"); err != nil {
+		return err
 	}
-
-	var generated []byte
-	generated = append(generated, []byte("# Grafana Deployment\n")...)
-	generated = append(generated, content...)
-	generated = append(generated, []byte("\n---\n")...)
 	fmt.Fprintf(os.Stderr, "Generated Grafana deployment\n")
 
 	// Generate the Grafana service.
@@ -1477,14 +1374,24 @@ func generateGrafanaServiceConfigs(appName string, cfg *kubeConfig) ([]byte, err
 			},
 		},
 	}
-	content, err = yaml.Marshal(s)
-	if err != nil {
-		return nil, err
+	if err := marshalResource(w, s, "Grafana Service"); err != nil {
+		return err
 	}
-	generated = append(generated, []byte("\n# Grafana Service\n")...)
-	generated = append(generated, content...)
-	generated = append(generated, []byte("\n---\n")...)
 	fmt.Fprintf(os.Stderr, "Generated Grafana service\n")
+	return nil
+}
 
-	return generated, nil
+// marshalResource marshals the provided Kubernetes resource into YAML into the
+// provided writer, prefixing it with the provided comment.
+func marshalResource(w io.Writer, resource any, comment string) error {
+	bytes, err := yaml.Marshal(resource)
+	if err != nil {
+		return err
+	}
+	fmt.Fprintf(w, "\n# %s\n", comment)
+	if _, err := w.Write(bytes); err != nil {
+		return err
+	}
+	fmt.Fprintf(w, "\n---\n")
+	return nil
 }

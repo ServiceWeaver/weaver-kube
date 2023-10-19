@@ -19,6 +19,7 @@ import (
 	_ "embed"
 	"fmt"
 	"html/template"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -37,7 +38,6 @@ import (
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/intstr"
-	"sigs.k8s.io/yaml"
 )
 
 const (
@@ -360,34 +360,28 @@ func generateYAMLs(image string, app *protos.AppConfig, depId string, cfg *kubeC
 	fmt.Fprintf(os.Stderr, greenText(), "\nGenerating kube deployment info ...")
 
 	// Generate header.
-	var generated []byte
+	var b bytes.Buffer
 	yamlFile := filepath.Join(os.TempDir(), fmt.Sprintf("kube_%s.yaml", depId[:8]))
 	header, err := header(app, cfg, depId, yamlFile)
 	if err != nil {
 		return err
 	}
-	generated = append(generated, []byte(header)...)
+	b.WriteString(header)
 
 	// Generate roles and role bindings.
-	content, err := generateRolesAndBindings(cfg.Namespace, cfg.ServiceAccount)
-	if err != nil {
+	if err := generateRolesAndBindings(&b, cfg.Namespace, cfg.ServiceAccount); err != nil {
 		return fmt.Errorf("unable to generate roles and bindings: %w", err)
 	}
-	generated = append(generated, content...)
 
 	// Generate core YAMLs (deployments, services, autoscalers).
-	content, err = generateCoreYAMLs(app, depId, cfg, image)
-	if err != nil {
+	if err := generateCoreYAMLs(&b, app, depId, cfg, image); err != nil {
 		return fmt.Errorf("unable to create kube app deployment: %w", err)
 	}
-	generated = append(generated, content...)
 
 	// Generate deployment info needed to get insights into the application.
-	content, err = generateObservabilityYAMLs(app.Name, cfg)
-	if err != nil {
+	if err := generateObservabilityYAMLs(&b, app.Name, cfg); err != nil {
 		return fmt.Errorf("unable to create configuration information: %w", err)
 	}
-	generated = append(generated, content...)
 
 	// Write the generated kube info into a file.
 	f, err := os.OpenFile(yamlFile, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
@@ -396,7 +390,7 @@ func generateYAMLs(image string, app *protos.AppConfig, depId string, cfg *kubeC
 	}
 	defer f.Close()
 
-	if _, err := f.Write(generated); err != nil {
+	if _, err := f.Write(b.Bytes()); err != nil {
 		return fmt.Errorf("unable to write the kube deployment info: %w", err)
 	}
 	fmt.Fprintf(os.Stderr, greenText(), "kube deployment information successfully generated")
@@ -504,7 +498,7 @@ func header(app *protos.AppConfig, cfg *kubeConfig, depId, filename string) (str
 
 // generateRolesAndBindings generates Kubernetes roles and role bindings in
 // a given namespace that grant permissions to the appropriate service accounts.
-func generateRolesAndBindings(namespace string, serviceAccount string) ([]byte, error) {
+func generateRolesAndBindings(w io.Writer, namespace, serviceAccount string) error {
 	// Grant the default service account the permission to get, list, and watch
 	// pods. The babysitter watches pods to generate routing info.
 	//
@@ -553,40 +547,28 @@ func generateRolesAndBindings(namespace string, serviceAccount string) ([]byte, 
 		},
 	}
 
-	var b bytes.Buffer
-	fmt.Fprintln(&b, "# Roles and bindings.")
-
-	bytes, err := yaml.Marshal(role)
-	if err != nil {
-		return nil, err
+	if err := marshalResource(w, role, "Roles."); err != nil {
+		return err
 	}
-	b.Write(bytes)
-	fmt.Fprintf(&b, "\n---\n\n")
-
-	bytes, err = yaml.Marshal(binding)
-	if err != nil {
-		return nil, err
+	if err := marshalResource(w, binding, "Role Bindings."); err != nil {
+		return err
 	}
-	b.Write(bytes)
-	fmt.Fprintf(&b, "\n---\n\n")
-
 	fmt.Fprintf(os.Stderr, "Generated roles and bindings\n")
-	return b.Bytes(), nil
+	return nil
 }
 
 // generateCoreYAMLs generates the core YAMLs for the given deployment.
-func generateCoreYAMLs(app *protos.AppConfig, depId string, cfg *kubeConfig, image string) ([]byte, error) {
+func generateCoreYAMLs(w io.Writer, app *protos.AppConfig, depId string, cfg *kubeConfig, image string) error {
 	// Generate the kubernetes replica sets for the deployment, along with
 	// their communication graph.
 	replicaSets, rg, err := buildReplicaSets(app, depId, image, cfg)
 	if err != nil {
-		return nil, fmt.Errorf("unable to create replica sets: %w", err)
+		return fmt.Errorf("unable to create replica sets: %w", err)
 	}
 
 	// For each replica set, build a deployment and an autoscaler. If a replica
 	// set has any listeners, build a service for each listener. We traverse
 	// the graph in a deterministic order, to achieve a stable YAML file.
-	var generated []byte
 	for _, n := range graph.ReversePostOrder(rg) {
 		rs := replicaSets[n]
 
@@ -595,49 +577,36 @@ func generateCoreYAMLs(app *protos.AppConfig, depId string, cfg *kubeConfig, ima
 			for _, lis := range listeners.Listeners {
 				ls, err := rs.buildListenerService(lis)
 				if err != nil {
-					return nil, fmt.Errorf("unable to create kube listener service for %s: %w", lis.Name, err)
+					return fmt.Errorf("unable to create kube listener service for %s: %w", lis.Name, err)
 				}
-				content, err := yaml.Marshal(ls)
-				if err != nil {
-					return nil, err
+				if err := marshalResource(w, ls, fmt.Sprintf("Listener Service for replica set %s", rs.name)); err != nil {
+					return err
 				}
-				generated = append(generated, []byte(fmt.Sprintf("\n# Listener Service for replica set %s\n", rs.name))...)
-				generated = append(generated, content...)
-				generated = append(generated, []byte("\n---\n")...)
 				fmt.Fprintf(os.Stderr, "Generated kube listener service for listener %v\n", lis.Name)
 			}
 		}
-		generated = append(generated, []byte("\n")...)
 
 		// Build a deployment.
 		d, err := rs.buildDeployment(cfg)
 		if err != nil {
-			return nil, fmt.Errorf("unable to create kube deployment for replica set %s: %w", rs.name, err)
+			return fmt.Errorf("unable to create kube deployment for replica set %s: %w", rs.name, err)
 		}
-		content, err := yaml.Marshal(d)
-		if err != nil {
-			return nil, err
+		if err := marshalResource(w, d, fmt.Sprintf("Deployment for replica set %s", rs.name)); err != nil {
+			return err
 		}
-		generated = append(generated, []byte(fmt.Sprintf("# Deployment for replica set %s\n", rs.name))...)
-		generated = append(generated, content...)
-		generated = append(generated, []byte("\n---\n")...)
 		fmt.Fprintf(os.Stderr, "Generated kube deployment for replica set %v\n", rs.name)
 
 		// Build a horizontal pod autoscaler for the deployment.
 		a, err := rs.buildAutoscaler()
 		if err != nil {
-			return nil, fmt.Errorf("unable to create kube autoscaler for replica set %s: %w", rs.name, err)
+			return fmt.Errorf("unable to create kube autoscaler for replica set %s: %w", rs.name, err)
 		}
-		content, err = yaml.Marshal(a)
-		if err != nil {
-			return nil, err
+		if err := marshalResource(w, a, fmt.Sprintf("Autoscaler for replica set %s", rs.name)); err != nil {
+			return err
 		}
-		generated = append(generated, []byte(fmt.Sprintf("\n# Autoscaler for replica set %s\n", rs.name))...)
-		generated = append(generated, content...)
-		generated = append(generated, []byte("\n---\n")...)
 		fmt.Fprintf(os.Stderr, "Generated kube autoscaler for replica set %v\n", rs.name)
 	}
-	return generated, nil
+	return nil
 }
 
 // buildReplicaSets returns the replica sets that will be used for the
