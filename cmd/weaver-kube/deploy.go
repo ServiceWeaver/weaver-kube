@@ -16,24 +16,11 @@ package main
 
 import (
 	"context"
-	"errors"
 	"flag"
 	"fmt"
-	"os"
-	"path/filepath"
 
 	"github.com/ServiceWeaver/weaver-kube/internal/impl"
-	swruntime "github.com/ServiceWeaver/weaver/runtime"
-	"github.com/ServiceWeaver/weaver/runtime/bin"
-	"github.com/ServiceWeaver/weaver/runtime/codegen"
 	"github.com/ServiceWeaver/weaver/runtime/tool"
-	"github.com/ServiceWeaver/weaver/runtime/version"
-	"github.com/google/uuid"
-)
-
-const (
-	configKey      = "github.com/ServiceWeaver/weaver/kube"
-	shortConfigKey = "kube"
 )
 
 var (
@@ -131,122 +118,11 @@ Container Image Names:
       [1] https://kubernetes.io/docs/concepts/configuration/manage-resources-containers/
 `,
 		Flags: flags,
-		Fn:    deploy,
+		Fn: func(ctx context.Context, args []string) error {
+			if len(args) != 1 {
+				return fmt.Errorf("usage: weaver kube deploy <config file>")
+			}
+			return impl.Deploy(ctx, args[0])
+		},
 	}
 )
-
-func deploy(ctx context.Context, args []string) error {
-	// Validate command line arguments.
-	if len(args) == 0 {
-		return fmt.Errorf("no config file provided")
-	}
-	if len(args) > 1 {
-		return fmt.Errorf("too many arguments")
-	}
-
-	// Load the config file.
-	cfgFile := args[0]
-	cfg, err := os.ReadFile(cfgFile)
-	if err != nil {
-		return fmt.Errorf("load config file %q: %w", cfgFile, err)
-	}
-
-	// Parse and validate the app config.
-	app, err := swruntime.ParseConfig(cfgFile, string(cfg), codegen.ComponentConfigValidator)
-	if err != nil {
-		return fmt.Errorf("load config file %q: %w", cfgFile, err)
-	}
-	if _, err := os.Stat(app.Binary); errors.Is(err, os.ErrNotExist) {
-		return fmt.Errorf("binary %q doesn't exist", app.Binary)
-	}
-	if err := checkVersionCompatibility(app.Binary); err != nil {
-		return err
-	}
-
-	// Parse and validate the kube section of the config.
-	config := &impl.KubeConfig{}
-	if err := swruntime.ParseConfigSection(configKey, shortConfigKey, app.Sections, config); err != nil {
-		return fmt.Errorf("parse kube config: %w", err)
-	}
-	if config.Repo == "" {
-		fmt.Fprintln(os.Stderr, "No container repo specified in the config file. The container image will only be accessible locally. See `weaver kube deploy --help` for details.")
-	}
-	if config.Namespace == "" {
-		config.Namespace = "default"
-	}
-	if config.ServiceAccount == "" {
-		config.ServiceAccount = "default"
-	}
-
-	binListeners, err := bin.ReadListeners(app.Binary)
-	if err != nil {
-		return fmt.Errorf("cannot read listeners from binary %s: %w", app.Binary, err)
-	}
-	allListeners := make(map[string]struct{})
-	for _, c := range binListeners {
-		for _, l := range c.Listeners {
-			allListeners[l] = struct{}{}
-		}
-	}
-	for lis := range config.Listeners {
-		if _, ok := allListeners[lis]; !ok {
-			return fmt.Errorf("listener %s specified in the config not found in the binary", lis)
-		}
-	}
-
-	// Unique app deployment identifier.
-	depId := uuid.New().String()
-
-	// Build the docker image for the deployment.
-	image, err := impl.BuildAndUploadDockerImage(ctx, app, depId, config.Image, config.Repo)
-	if err != nil {
-		return err
-	}
-
-	// Generate the kube deployment information.
-	return impl.GenerateYAMLs(image, app, depId, config)
-}
-
-// checkVersionCompatibility checks that the tool binary is compatible with
-// the application binary being deployed.
-func checkVersionCompatibility(appBinary string) error {
-	versions, err := bin.ReadVersions(appBinary)
-	if err != nil {
-		return fmt.Errorf("read versions: %w", err)
-	}
-	selfVersion, _, err := impl.ToolVersion()
-	if err != nil {
-		return fmt.Errorf("read weaver-kube version: %w", err)
-	}
-	relativize := func(bin string) string {
-		cwd, err := os.Getwd()
-		if err != nil {
-			return bin
-		}
-		rel, err := filepath.Rel(cwd, bin)
-		if err != nil {
-			return bin
-		}
-		return rel
-	}
-	if versions.DeployerVersion != version.DeployerVersion {
-		// Try to relativize the binary, defaulting to the absolute path if
-		// there are any errors..
-		return fmt.Errorf(`
-	ERROR: The binary you're trying to deploy (%q) was built with
-	github.com/ServiceWeaver/weaver module version %s. However, the 'weaver-kube'
-	binary you're using was built with weaver module version %s. These versions are
-	incompatible.
-
-	We recommend updating both the weaver module your application is built with and
-	updating the 'weaver-kube' command by running the following.
-
-		go get github.com/ServiceWeaver/weaver@latest
-		go install github.com/ServiceWeaver/weaver-kube/cmd/weaver-kube@latest
-
-	Then, re-build your code and re-run 'weaver-kube deploy'. If the problem
-	persists, please file an issue at https://github.com/ServiceWeaver/weaver/issues`,
-			relativize(appBinary), versions.ModuleVersion, selfVersion)
-	}
-	return nil
-}
