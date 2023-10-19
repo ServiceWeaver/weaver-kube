@@ -104,6 +104,10 @@ type kubeConfig struct {
 	//
 	// [1] https://pkg.go.dev/k8s.io/apimachinery/pkg/api/resource#example-MustParse.
 	Resources resourceRequirements
+
+	// Options for probes to check the readiness/liveness of the pods.
+	LivenessProbeOpts  *probeOptions `toml:"liveness_probe"`
+	ReadinessProbeOpts *probeOptions `toml:"readiness_probe"`
 }
 
 // listenerConfig stores configuration options for a listener.
@@ -133,4 +137,57 @@ type resourceRequirements struct {
 	LimitsCPU string `toml:"limits_cpu"`
 	// Describes the maximum amount of memory allowed to run the pod.
 	LimitsMem string `toml:"limits_mem"`
+}
+
+// probeOptions stores the probes [1] configuration for the pods. These options
+// mirror the Kubernetes probe options available in [2].
+//
+// [1] https://kubernetes.io/docs/tasks/configure-pod-container/configure-liveness-readiness-startup-probes/
+// [2] https://github.com/kubernetes/api/blob/v0.28.3/core/v1/types.go#L2277
+//
+// TODO(rgrandl): There are a few more knobs available in the kubernetes probe
+// definition. We can enable more knobs if really needed.
+type probeOptions struct {
+	// How often to perform the probe.
+	PeriodSecs int32 `toml:"period_secs"`
+	// Number of seconds after which the probe times out.
+	TimeoutSecs int32 `toml:"timeout_secs"`
+	// Minimum consecutive successes for the probe to be considered successful after having failed.
+	SuccessThreshold int32 `toml:"success_threshold"`
+	// Minimum consecutive failures for the probe to be considered failed after having succeeded.
+	FailureThreshold int32 `toml:"failure_threshold"`
+
+	// Probe behavior. Note that only one of the following should be set by the user.
+
+	// The probe action is taken by executing commands.
+	Exec *execAction
+	// The probe action is taken by executing HTTP GET requests.
+	Http *httpAction
+	// The probe action is taken by executing TCP requests.
+	Tcp *tcpAction
+}
+
+// execAction describes the probe action when using a list of commands. It mirrors
+// Kubernetes ExecAction [1].
+//
+// [1] https://github.com/kubernetes/api/blob/v0.28.3/core/v1/types.go#L2265
+type execAction struct {
+	Cmd []string // List of commands to execute inside the container.
+}
+
+// httpAction describes the probe action when using HTTP. It mirrors Kubernetes
+// HTTPGetAction [1].
+//
+// [1] https://github.com/kubernetes/api/blob/v0.28.3/core/v1/types.go#L2208
+type httpAction struct {
+	Path string // Path to access on the HTTP server.
+	Port int32  // Port number to access on the container.
+}
+
+// tcpAction describes the probe action when using TCP. It mirrors Kubernetes
+// TCPSocketAction [1].
+//
+// [1] https://github.com/kubernetes/api/blob/v0.28.3/core/v1/types.go#L2241
+type tcpAction struct {
+	Port int32 // Port number to access on the container.
 }

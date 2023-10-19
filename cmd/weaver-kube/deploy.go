@@ -116,6 +116,24 @@ Container Image Names:
       You can also specify any combination of the various options or none.
 
       [1] https://kubernetes.io/docs/concepts/configuration/manage-resources-containers/
+
+    e) Configure probes [1]. The kube deployer allows you to configure readiness
+       and liveness probes. For each probe, you can configure:
+         - how often to perform the probe "period_secs"
+         - how long to wait for a probe to respond before declaring a timeout "timeout_secs"
+         - minimum consecutive successes for the probe to be successful "success_threshold"
+         - minimum consecutive failures for the probe to be considered failed "failure_threshold"
+         - a probe handler that describes the probe behavior. You can use a TCP,
+           HTTP or a custom commands probe handler.
+
+       E.g.,
+       [kube.readiness_probe]
+       period_secs = 2
+       [kube.readiness_probe.http]
+       path = "/health"
+       port = 8081
+
+      [1] https://kubernetes.io/docs/tasks/configure-pod-container/configure-liveness-readiness-startup-probes/
 `,
 		Flags: flags,
 		Fn: func(ctx context.Context, args []string) error {
