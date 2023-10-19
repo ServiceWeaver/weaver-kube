@@ -52,8 +52,6 @@ const (
 	servicePort = 80
 
 	// Port used by the weavelets to listen for internal traffic.
-	//
-	// TODO(mwhittaker): Remove internal port from kube.proto.
 	internalPort = 10000
 )
 
@@ -68,7 +66,6 @@ type replicaSet struct {
 	namespace       string                        // namespace of the replica set
 	depId           string                        // app deployment identifier
 	app             *protos.AppConfig             // app configuration
-	internalPort    int                           // internal weavelet port
 	traceServiceURL string                        // trace exporter URL
 }
 
@@ -398,7 +395,6 @@ func (r *replicaSet) buildContainer(cfg *KubeConfig) (corev1.Container, error) {
 		Name:            r.name,
 		DepId:           r.depId,
 		App:             r.app,
-		InternalPort:    int32(r.internalPort),
 		TraceServiceUrl: r.traceServiceURL,
 		Components:      r.components,
 	})
@@ -823,7 +819,6 @@ func buildReplicaSets(app *protos.AppConfig, depId string, image string, cfg *Ku
 				namespace:       cfg.Namespace,
 				depId:           depId,
 				app:             app,
-				internalPort:    internalPort,
 				traceServiceURL: traceServiceURL,
 			}
 		}

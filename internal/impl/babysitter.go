@@ -93,7 +93,7 @@ func RunBabysitter(ctx context.Context) error {
 		Id:              uuid.New().String(),
 		Sections:        cfg.App.Sections,
 		RunMain:         cfg.Name == runtime.Main,
-		InternalAddress: fmt.Sprintf("%s:%d", host, cfg.InternalPort),
+		InternalAddress: fmt.Sprintf("%s:%d", host, internalPort),
 	}
 	e, err := envelope.NewEnvelope(ctx, wlet, cfg.App)
 	if err != nil {
