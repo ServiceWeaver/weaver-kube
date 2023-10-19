@@ -56,10 +56,10 @@ type buildSpec struct {
 	goInstall []string // binary targets that should be 'go install'-ed
 }
 
-// BuildAndUploadDockerImage builds a docker image and uploads it to a remote
+// buildAndUploadDockerImage builds a docker image and uploads it to a remote
 // repo, if one is specified. It returns the image name that should be used in
 // Kubernetes YAML files.
-func BuildAndUploadDockerImage(ctx context.Context, app *protos.AppConfig, depId string,
+func buildAndUploadDockerImage(ctx context.Context, app *protos.AppConfig, depId string,
 	image, repo string) (string, error) {
 	// Create the build specifications.
 	spec, err := dockerBuildSpec(app, depId, image)

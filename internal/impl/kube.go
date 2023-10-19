@@ -69,126 +69,6 @@ type replicaSet struct {
 	traceServiceURL string                        // trace exporter URL
 }
 
-// ListenerOptions stores configuration options for a listener.
-type ListenerOptions struct {
-	// If specified, the listener service will have the name set to this value.
-	// Otherwise, we will generate a unique name for each app version.
-	ServiceName string `toml:"service_name"`
-
-	// Is the listener public, i.e., should it receive ingress traffic
-	// from the public internet. If false, the listener is configured only
-	// for cluster-internal access.
-	Public bool
-
-	// If specified, the port inside the container on which the listener
-	// is reachable. If zero or not specified, the first available port
-	// is used.
-	Port int32
-}
-
-// resourceRequirements stores the resource requirements configuration for running pods.
-type resourceRequirements struct {
-	// Describes the minimum amount of CPU required to run the pod.
-	RequestsCPU string `toml:"requests_cpu"`
-	// Describes the minimum amount of memory required to run the pod.
-	RequestsMem string `toml:"requests_mem"`
-	// Describes the maximum amount of CPU allowed to run the pod.
-	LimitsCPU string `toml:"limits_cpu"`
-	// Describes the maximum amount of memory allowed to run the pod.
-	LimitsMem string `toml:"limits_mem"`
-}
-
-// KubeConfig stores the configuration information for one execution of a
-// Service Weaver application deployed using the Kube deployer.
-type KubeConfig struct {
-	// Image is the name of the container image hosting the Service Weaver
-	// application.
-	//
-	// If empty, the image name defaults to "<app_name>:<app_version>", where
-	// <app_name> is the name of the app, and <app_version> is the unique
-	// version id of the application deployment.
-	Image string
-
-	// Repo is the name of the repository where the container image is uploaded.
-	//
-	// For example, if Image is "mycontainer:v1" and Repo is
-	// "docker.io/alanturing", then "weaver kube deploy" will build the image
-	// locally as "mycontainer:v1" and then push it to
-	// "docker.io/alanturing/mycontainer:v1".
-	//
-	// If empty, the image is not pushed to a repository.
-	//
-	// Example repositories are:
-	//   - Docker Hub                : docker.io/USERNAME
-	//   - Google Artifact Registry  : LOCATION-docker.pkg.dev/PROJECT-ID
-	//   - GitHub Container Registry : ghcr.io/NAMESPACE
-	Repo string
-
-	// Namespace is the name of the Kubernetes namespace where the application
-	// should be deployed. If not specified, the application will be deployed in
-	// the default namespace.
-	Namespace string
-
-	// If set, it specifies the service account [1] under which to run the pods.
-	// Otherwise, the application is being deployed using the default service
-	// account for your namespace.
-	//
-	// [1] https://kubernetes.io/docs/concepts/security/service-accounts/
-	ServiceAccount string `toml:"service_account"`
-
-	// If true, application listeners will use the underlying nodes' network.
-	// This behavior is generally discouraged, but it may be useful when running
-	// the application in a minikube environment, where using the underlying
-	// nodes' network may make it easier to access the listeners directly from
-	// the host machine.
-	UseHostNetwork bool `toml:"use_host_network"`
-
-	// Options for the application listeners, keyed by listener name.
-	// If a listener isn't specified in the map, default options will be used.
-	Listeners map[string]*ListenerOptions
-
-	// Observability controls how the deployer will export observability information
-	// such as logs, metrics and traces, keyed by service. If no options are
-	// specified, the deployer will launch corresponding services for exporting logs,
-	// metrics and traces automatically.
-	//
-	// The key must be one of the following strings:
-	// "prometheus_service" - to export metrics to Prometheus [1]
-	// "jaeger_service"     - to export traces to Jaeger [2]
-	// "loki_service"       - to export logs to Grafana Loki [3]
-	// "grafana_service"    - to visualize/manipulate observability information [4]
-	//
-	// Possible values for each service:
-	// 1) do not specify a value at all; leave it empty
-	// this is the default behavior; kube deployer will automatically create the
-	// observability service for you.
-	//
-	// 2) "none"
-	// kube deployer will not export the corresponding observability information to
-	// any service. E.g., prometheus_service = "none" means that the user will not
-	// be able to see any metrics at all. This can be useful for testing or
-	// benchmarking the performance of your application.
-	//
-	// 3) "your_observability_service_name"
-	// if you already have a running service to collect metrics, traces or logs,
-	// then you can simply specify the service name, and your application will
-	// automatically export the corresponding information to your service. E.g.,
-	// jaeger_service = "jaeger-all-in-one" will enable your running Jaeger
-	// "service/jaeger-all-in-one" to capture all the app traces.
-	//
-	// [1] - https://prometheus.io/
-	// [2] - https://www.jaegertracing.io/
-	// [3] - https://grafana.com/oss/loki/
-	// [4] - https://grafana.com/
-	Observability map[string]string
-
-	// Resources needed to run the pods. Note that the resources should satisfy
-	// the format specified in [1].
-	//
-	// [1] https://pkg.go.dev/k8s.io/apimachinery/pkg/api/resource#example-MustParse.
-	Resources resourceRequirements
-}
-
 // shortenComponent shortens the given component name to be of the format
 // <pkg>-<IfaceType>. (Recall that the full component name is of the format
 // <path1>/<path2>/.../<pathN>/<IfaceType>.)
@@ -220,7 +100,7 @@ func (r *replicaSet) deploymentName() string {
 // TODO(rgrandl): test to see if it works with an app where a component foo is
 // collocated with main, and a component bar that is not collocated with main
 // calls foo.
-func (r *replicaSet) buildDeployment(cfg *KubeConfig) (*appsv1.Deployment, error) {
+func (r *replicaSet) buildDeployment(cfg *kubeConfig) (*appsv1.Deployment, error) {
 	name := r.deploymentName()
 	matchLabels := map[string]string{"serviceweaver/name": name}
 	podLabels := map[string]string{
@@ -386,7 +266,7 @@ func (r *replicaSet) buildAutoscaler() (*autoscalingv2.HorizontalPodAutoscaler, 
 }
 
 // buildContainer builds a container specification for a replica set.
-func (r *replicaSet) buildContainer(cfg *KubeConfig) (corev1.Container, error) {
+func (r *replicaSet) buildContainer(cfg *kubeConfig) (corev1.Container, error) {
 	// Set the binary path in the deployment w.r.t. to the binary path in the
 	// docker image.
 	r.app.Binary = fmt.Sprintf("/weaver/%s", filepath.Base(r.app.Binary))
@@ -449,7 +329,7 @@ func (r *replicaSet) buildContainer(cfg *KubeConfig) (corev1.Container, error) {
 	}, nil
 }
 
-// GenerateYAMLs generates Kubernetes YAML configurations for a given
+// generateYAMLs generates Kubernetes YAML configurations for a given
 // application version.
 //
 // The following Kubernetes YAML configurations will be generated:
@@ -476,7 +356,7 @@ func (r *replicaSet) buildContainer(cfg *KubeConfig) (corev1.Container, error) {
 //
 //   - If observability services are enabled (e.g., Prometheus, Jaeger), a
 //     Kubernetes Deployment and/or a Service for each observability service.
-func GenerateYAMLs(image string, app *protos.AppConfig, depId string, cfg *KubeConfig) error {
+func generateYAMLs(image string, app *protos.AppConfig, depId string, cfg *kubeConfig) error {
 	fmt.Fprintf(os.Stderr, greenText(), "\nGenerating kube deployment info ...")
 
 	// Generate header.
@@ -525,7 +405,7 @@ func GenerateYAMLs(image string, app *protos.AppConfig, depId string, cfg *KubeC
 }
 
 // header returns the informational header at the top of a generated YAML file.
-func header(app *protos.AppConfig, cfg *KubeConfig, depId, filename string) (string, error) {
+func header(app *protos.AppConfig, cfg *kubeConfig, depId, filename string) (string, error) {
 	header := template.Must(template.New("header").Parse(`# This file was generated by "weaver kube" version {{.ToolVersion}} for the following
 # application:
 #
@@ -695,7 +575,7 @@ func generateRolesAndBindings(namespace string, serviceAccount string) ([]byte, 
 }
 
 // generateCoreYAMLs generates the core YAMLs for the given deployment.
-func generateCoreYAMLs(app *protos.AppConfig, depId string, cfg *KubeConfig, image string) ([]byte, error) {
+func generateCoreYAMLs(app *protos.AppConfig, depId string, cfg *kubeConfig, image string) ([]byte, error) {
 	// Generate the kubernetes replica sets for the deployment, along with
 	// their communication graph.
 	replicaSets, rg, err := buildReplicaSets(app, depId, image, cfg)
@@ -763,7 +643,7 @@ func generateCoreYAMLs(app *protos.AppConfig, depId string, cfg *KubeConfig, ima
 // buildReplicaSets returns the replica sets that will be used for the
 // given deployment, along with the communication graph used between those
 // replica sets.
-func buildReplicaSets(app *protos.AppConfig, depId string, image string, cfg *KubeConfig) ([]*replicaSet, graph.Graph, error) {
+func buildReplicaSets(app *protos.AppConfig, depId string, image string, cfg *kubeConfig) ([]*replicaSet, graph.Graph, error) {
 	// Compute the URL of the export traces service.
 	var traceServiceURL string
 	jservice := cfg.Observability[tracesConfigKey]
@@ -878,7 +758,7 @@ func computeResourceRequirements(req resourceRequirements) (corev1.ResourceRequi
 
 // readBinary returns the component and listener information embedded in the
 // binary.
-func readBinary(app *protos.AppConfig, cfg *KubeConfig) ([]*ReplicaSetConfig_Component, graph.Graph, error) {
+func readBinary(app *protos.AppConfig, cfg *kubeConfig) ([]*ReplicaSetConfig_Component, graph.Graph, error) {
 	// Read the component graph from the binary.
 	cs, g, err := bin.ReadComponentGraph(app.Binary)
 	if err != nil {

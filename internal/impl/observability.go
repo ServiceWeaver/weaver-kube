@@ -151,7 +151,7 @@ var dashboardContent string
 
 // generateObservabilityYAMLs generates Kubernetes YAMLs for exporting
 // applications' metrics, logs, and traces.
-func generateObservabilityYAMLs(appName string, cfg *KubeConfig) ([]byte, error) {
+func generateObservabilityYAMLs(appName string, cfg *kubeConfig) ([]byte, error) {
 	configs, err := generateConfigsToExportTraces(appName, cfg)
 	if err != nil {
 		return nil, fmt.Errorf("unable to create kube configs to export traces: %w", err)
@@ -208,7 +208,7 @@ func generateObservabilityYAMLs(appName string, cfg *KubeConfig) ([]byte, error)
 // observability = {jaeger_service = "jaeger-all-in-one"}
 //
 // [1] https://helm.sh/
-func generateConfigsToExportTraces(appName string, cfg *KubeConfig) ([]byte, error) {
+func generateConfigsToExportTraces(appName string, cfg *kubeConfig) ([]byte, error) {
 	// The user disabled exporting the traces, don't generate anything.
 	if cfg.Observability[tracesConfigKey] != auto {
 		return nil, nil
@@ -354,7 +354,7 @@ func generateConfigsToExportTraces(appName string, cfg *KubeConfig) ([]byte, err
 // observability = {prometheus_service = "prometheus-server"}
 //
 // [1] https://helm.sh/
-func generateConfigsToExportMetrics(appName string, cfg *KubeConfig) ([]byte, error) {
+func generateConfigsToExportMetrics(appName string, cfg *kubeConfig) ([]byte, error) {
 	// The user disabled exporting the metrics, don't generate anything.
 	if cfg.Observability[metricsConfigKey] == disabled {
 		return nil, nil
@@ -389,7 +389,7 @@ func generateConfigsToExportMetrics(appName string, cfg *KubeConfig) ([]byte, er
 //
 // Note that these configs are needed by both the automatically started Prometheus
 // service and the one started by the user.
-func generatePrometheusConfigs(appName string, cfg *KubeConfig) ([]byte, error) {
+func generatePrometheusConfigs(appName string, cfg *kubeConfig) ([]byte, error) {
 	cname := name{appName, "prometheus", "config"}.DNSLabel()
 	pname := name{appName, "prometheus"}.DNSLabel()
 
@@ -452,7 +452,7 @@ scrape_configs:
 //
 // TODO(rgrandl): We run a single instance of Prometheus for now. We might want
 // to scale it up if it becomes a bottleneck.
-func generatePrometheusServiceConfigs(appName string, cfg *KubeConfig) ([]byte, error) {
+func generatePrometheusServiceConfigs(appName string, cfg *kubeConfig) ([]byte, error) {
 	cname := name{appName, "prometheus", "config"}.DNSLabel()
 	pname := name{appName, "prometheus"}.DNSLabel()
 
@@ -630,7 +630,7 @@ func generatePrometheusServiceConfigs(appName string, cfg *KubeConfig) ([]byte, 
 //	it will automatically add your Loki service as a datasource.
 //
 // [1] https://helm.sh/
-func generateConfigsToExportLogs(appName string, cfg *KubeConfig) ([]byte, error) {
+func generateConfigsToExportLogs(appName string, cfg *kubeConfig) ([]byte, error) {
 	// The user disabled exporting the logs, don't generate anything.
 	if cfg.Observability[logsConfigKey] == disabled {
 		return nil, nil
@@ -679,7 +679,7 @@ func generateConfigsToExportLogs(appName string, cfg *KubeConfig) ([]byte, error
 // service and the one started by the user.
 //
 // TODO(rgrandl): check if we can simplify the configurations.
-func generateLokiConfigs(appName string, cfg *KubeConfig) ([]byte, error) {
+func generateLokiConfigs(appName string, cfg *kubeConfig) ([]byte, error) {
 	cname := name{appName, "loki", "config"}.DNSLabel()
 	lname := name{appName, "loki"}.DNSLabel()
 
@@ -760,7 +760,7 @@ schema_config:
 // agent and the one started by the user.
 //
 // TODO(rgrandl): check if we can simplify the configurations.
-func generatePromtailConfigs(appName string, cfg *KubeConfig) ([]byte, error) {
+func generatePromtailConfigs(appName string, cfg *kubeConfig) ([]byte, error) {
 	promName := name{appName, "promtail"}.DNSLabel()
 
 	var lokiURL string
@@ -859,7 +859,7 @@ scrape_configs:
 //
 // TODO(rgrandl): We run a single instance of Loki for now. We might want to
 // scale it up if it becomes a bottleneck.
-func generateLokiServiceConfigs(appName string, cfg *KubeConfig) ([]byte, error) {
+func generateLokiServiceConfigs(appName string, cfg *kubeConfig) ([]byte, error) {
 	// Build the kubernetes Loki deployment.
 	cname := name{appName, "loki", "config"}.DNSLabel()
 	lname := name{appName, "loki"}.DNSLabel()
@@ -976,7 +976,7 @@ func generateLokiServiceConfigs(appName string, cfg *KubeConfig) ([]byte, error)
 //
 // Note that the configs should be generated iff the kube deployer automatically
 // runs Promtail along with the app.
-func generatePromtailAgentConfigs(appName string, cfg *KubeConfig) ([]byte, error) {
+func generatePromtailAgentConfigs(appName string, cfg *kubeConfig) ([]byte, error) {
 	// Create a Promtail daemonset that will run on each node. The daemonset will
 	// run in order to scrape the pods running on each node.
 	promName := name{appName, "promtail"}.DNSLabel()
@@ -1141,7 +1141,7 @@ func generatePromtailAgentConfigs(appName string, cfg *KubeConfig) ([]byte, erro
 // the configured datasources.
 //
 // [1] https://helm.sh/
-func generateConfigsToExportToGrafana(appName string, cfg *KubeConfig) ([]byte, error) {
+func generateConfigsToExportToGrafana(appName string, cfg *kubeConfig) ([]byte, error) {
 	// The user disabled Grafana, don't generate anything.
 	if cfg.Observability[grafanaConfigKey] == disabled {
 		return nil, nil
@@ -1175,7 +1175,7 @@ func generateConfigsToExportToGrafana(appName string, cfg *KubeConfig) ([]byte, 
 // to manipulate various datasources and to export dashboards.
 //
 // TODO(rgrandl): check if we can simplify the configurations.
-func generateGrafanaConfigs(appName string, cfg *KubeConfig) ([]byte, error) {
+func generateGrafanaConfigs(appName string, cfg *kubeConfig) ([]byte, error) {
 	cname := name{appName, "grafana", "config"}.DNSLabel()
 
 	// Build the config map that holds the Grafana configuration file. In the
@@ -1316,7 +1316,7 @@ providers:
 //
 // TODO(rgrandl): We run a single instance of Grafana for now. We might want
 // to scale it up if it becomes a bottleneck.
-func generateGrafanaServiceConfigs(appName string, cfg *KubeConfig) ([]byte, error) {
+func generateGrafanaServiceConfigs(appName string, cfg *kubeConfig) ([]byte, error) {
 	cname := name{appName, "grafana", "config"}.DNSLabel()
 	gname := name{appName, "grafana"}.DNSLabel()
 
