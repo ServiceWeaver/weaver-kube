@@ -10,6 +10,7 @@ require (
 	go.opentelemetry.io/otel/sdk v1.16.0
 	go.opentelemetry.io/otel/trace v1.19.0
 	golang.org/x/exp v0.0.0-20230713183714-613f0c0eb8a1
+	golang.org/x/sync v0.3.0
 	google.golang.org/protobuf v1.31.0
 	k8s.io/api v0.27.4
 	k8s.io/apimachinery v0.27.4
@@ -56,7 +57,6 @@ require (
 	golang.org/x/mod v0.12.0 // indirect
 	golang.org/x/net v0.17.0 // indirect
 	golang.org/x/oauth2 v0.0.0-20220223155221-ee480838109b // indirect
-	golang.org/x/sync v0.3.0 // indirect
 	golang.org/x/sys v0.13.0 // indirect
 	golang.org/x/term v0.13.0 // indirect
 	golang.org/x/text v0.13.0 // indirect

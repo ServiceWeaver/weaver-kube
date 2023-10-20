@@ -99,7 +99,7 @@ func Deploy(ctx context.Context, configFilename string) error {
 	}
 
 	// Generate the kube deployment information.
-	return generateYAMLs(image, app, depId, config)
+	return generateYAMLs(configFilename, app, config, depId, image)
 }
 
 // checkVersionCompatibility checks that the `weaver kube` binary is compatible

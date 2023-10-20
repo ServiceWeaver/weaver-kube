@@ -23,9 +23,9 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"slices"
 	"sync"
 
-	"github.com/ServiceWeaver/weaver-kube/internal/proto"
 	"github.com/ServiceWeaver/weaver/runtime"
 	"github.com/ServiceWeaver/weaver/runtime/envelope"
 	"github.com/ServiceWeaver/weaver/runtime/logging"
@@ -36,6 +36,7 @@ import (
 	"github.com/google/uuid"
 	"go.opentelemetry.io/otel/exporters/jaeger"
 	"go.opentelemetry.io/otel/sdk/trace"
+	"golang.org/x/sync/errgroup"
 	v1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/watch"
@@ -53,62 +54,46 @@ var logDir = filepath.Join(runtime.LogsDir(), "kube")
 
 // babysitter starts and manages a weavelet inside the Pod.
 type babysitter struct {
-	ctx          context.Context
-	cfg          *ReplicaSetConfig
-	envelope     *envelope.Envelope
-	exportTraces func(spans *protos.TraceSpans) error
-	clientset    *kubernetes.Clientset
-
-	logger *slog.Logger
-
-	// printer pretty prints log entries.
-	printer *logging.PrettyPrinter
+	ctx           context.Context
+	cfg           *BabysitterConfig
+	app           *protos.AppConfig
+	envelope      *envelope.Envelope
+	logger        *slog.Logger
+	traceExporter *jaeger.Exporter
+	clientset     *kubernetes.Clientset
+	printer       *logging.PrettyPrinter
 
 	mu       sync.Mutex
 	watching map[string]struct{} // components being watched
 }
 
-func RunBabysitter(ctx context.Context) error {
-	// Retrieve the deployment information.
-	val, ok := os.LookupEnv(kubeConfigEnvKey)
-	if !ok {
-		return fmt.Errorf("environment variable %q not set", kubeConfigEnvKey)
-	}
-	if val == "" {
-		return fmt.Errorf("empty value for environment variable %q", kubeConfigEnvKey)
-	}
-	cfg := &ReplicaSetConfig{}
-	if err := proto.FromEnv(val, cfg); err != nil {
-		return err
-	}
-	host, err := os.Hostname()
-	if err != nil {
-		return fmt.Errorf("error getting local hostname: %w", err)
-	}
+func NewBabysitter(ctx context.Context, app *protos.AppConfig, config *BabysitterConfig, components []string) (*babysitter, error) {
+	// Rewrite the app config to point to the binary in the container.
+	app.Binary = fmt.Sprintf("/weaver/%s", filepath.Base(app.Binary))
 
 	// Create the envelope.
 	wlet := &protos.EnvelopeInfo{
-		App:             cfg.App.Name,
-		DeploymentId:    cfg.DepId,
+		App:             app.Name,
+		DeploymentId:    config.DeploymentId,
 		Id:              uuid.New().String(),
-		Sections:        cfg.App.Sections,
-		RunMain:         cfg.Name == runtime.Main,
-		InternalAddress: fmt.Sprintf("%s:%d", host, internalPort),
+		Sections:        app.Sections,
+		RunMain:         slices.Contains(components, runtime.Main),
+		InternalAddress: fmt.Sprintf(":%d", internalPort),
 	}
-	e, err := envelope.NewEnvelope(ctx, wlet, cfg.App)
+	e, err := envelope.NewEnvelope(ctx, wlet, app)
 	if err != nil {
-		return err
+		return nil, fmt.Errorf("NewBabysitter: create envelope: %w", err)
 	}
 
 	// Create the logger.
 	fs, err := logging.NewFileStore(logDir)
 	if err != nil {
-		return fmt.Errorf("cannot create log storage: %w", err)
+		return nil, fmt.Errorf("NewBabysitter: create logger: %w", err)
 	}
 	logSaver := fs.Add
 	logger := slog.New(&logging.LogHandler{
 		Opts: logging.Options{
-			App:       cfg.App.Name,
+			App:       app.Name,
 			Component: "deployer",
 			Weavelet:  uuid.NewString(),
 			Attrs:     []string{"serviceweaver/system", ""},
@@ -117,67 +102,53 @@ func RunBabysitter(ctx context.Context) error {
 	})
 
 	// Create the trace exporter.
-	shouldExportTraces := cfg.TraceServiceUrl != ""
 	var traceExporter *jaeger.Exporter
-	if shouldExportTraces {
-		// Export traces iff there is a tracing service running that is able to receive
-		// these traces.
-		traceExporter, err =
-			jaeger.New(jaeger.WithCollectorEndpoint(jaeger.WithEndpoint(cfg.TraceServiceUrl)))
+	if config.TraceServiceUrl != "" {
+		// Export traces if there is a tracing service running that is able to
+		// receive these traces.
+		endpoint := jaeger.WithCollectorEndpoint(jaeger.WithEndpoint(config.TraceServiceUrl))
+		traceExporter, err = jaeger.New(endpoint)
 		if err != nil {
-			logger.Error("Unable to create trace exporter", "err", err)
-			return err
+			return nil, fmt.Errorf("NewBabysitter: create trace exporter: %w", err)
 		}
-	}
-	defer traceExporter.Shutdown(ctx) //nolint:errcheck // response write error
-
-	exportTraces := func(spans *protos.TraceSpans) error {
-		if !shouldExportTraces {
-			return nil
-		}
-
-		var spansToExport []trace.ReadOnlySpan
-		for _, span := range spans.Span {
-			spansToExport = append(spansToExport, &traces.ReadSpan{Span: span})
-		}
-		return traceExporter.ExportSpans(ctx, spansToExport)
 	}
 
 	// Create a Kubernetes config.
-	config, err := rest.InClusterConfig()
+	kubeConfig, err := rest.InClusterConfig()
 	if err != nil {
-		return err
+		return nil, fmt.Errorf("NewBabysitter: get kube config: %w", err)
 	}
-	clientset, err := kubernetes.NewForConfig(config)
+	clientset, err := kubernetes.NewForConfig(kubeConfig)
 	if err != nil {
-		return err
+		return nil, fmt.Errorf("NewBabysitter: get kube client set: %w", err)
 	}
 
 	// Create the babysitter.
 	b := &babysitter{
-		ctx:          ctx,
-		cfg:          cfg,
-		envelope:     e,
-		exportTraces: exportTraces,
-		clientset:    clientset,
-		logger:       logger,
-		printer:      logging.NewPrettyPrinter(false /*colors disabled*/),
-		watching:     map[string]struct{}{},
+		ctx:           ctx,
+		cfg:           config,
+		app:           app,
+		envelope:      e,
+		logger:        logger,
+		traceExporter: traceExporter,
+		clientset:     clientset,
+		printer:       logging.NewPrettyPrinter(false /*colors disabled*/),
+		watching:      map[string]struct{}{},
 	}
 
 	// Inform the weavelet of the components it should host.
-	components := make([]string, len(cfg.Components))
-	for i, c := range cfg.Components {
-		components[i] = c.Name
-	}
 	if err := b.envelope.UpdateComponents(components); err != nil {
-		return err
+		return nil, fmt.Errorf("NewBabysitter: update components: %w", err)
 	}
 
-	// Run a http server that exports the metrics.
-	lis, err := net.Listen("tcp", fmt.Sprintf("%s:%d", host, defaultMetricsPort))
+	return b, nil
+}
+
+func (b *babysitter) Serve() error {
+	// Run an HTTP server that exports metrics.
+	lis, err := net.Listen("tcp", fmt.Sprintf(":%d", defaultMetricsPort))
 	if err != nil {
-		return fmt.Errorf("unable to listen on port %d: %w", defaultMetricsPort, err)
+		return fmt.Errorf("Babysitter.Serve: listen on port %d: %w", defaultMetricsPort, err)
 	}
 	mux := http.NewServeMux()
 	mux.HandleFunc(prometheusEndpoint, func(w http.ResponseWriter, r *http.Request) {
@@ -187,14 +158,19 @@ func RunBabysitter(ctx context.Context) error {
 		prometheus.TranslateMetricsToPrometheusTextFormat(&b, metrics, r.Host, prometheusEndpoint)
 		w.Write(b.Bytes()) //nolint:errcheck // response write error
 	})
-	go func() {
-		if err := serveHTTP(ctx, lis, mux); err != nil {
-			fmt.Fprintf(os.Stderr, "Unable to start HTTP server: %v\n", err)
-		}
-	}()
+	var group errgroup.Group
+	group.Go(func() error {
+		return serveHTTP(b.ctx, lis, mux)
+	})
 
 	// Run the envelope and handle messages from the weavelet.
-	return e.Serve(b)
+	group.Go(func() error {
+		return b.envelope.Serve(b)
+	})
+
+	err = group.Wait()
+	b.traceExporter.Shutdown(b.ctx) //nolint:errcheck // response write error
+	return err
 }
 
 // ActivateComponent implements the envelope.EnvelopeHandler interface.
@@ -221,8 +197,8 @@ func (b *babysitter) watchPods(ctx context.Context, component string) error {
 	b.mu.Unlock()
 
 	// Watch the pods running the requested component.
-	rs := replicaSetName(component, b.cfg.App)
-	name := deploymentName(b.cfg.App.Name, rs, b.cfg.DepId)
+	rs := replicaSetName(component, b.app)
+	name := deploymentName(b.app.Name, rs, b.cfg.DeploymentId)
 	opts := metav1.ListOptions{LabelSelector: fmt.Sprintf("serviceweaver/name=%s", name)}
 	watcher, err := b.clientset.CoreV1().Pods(b.cfg.Namespace).Watch(ctx, opts)
 	if err != nil {
@@ -281,17 +257,11 @@ func (b *babysitter) watchPods(ctx context.Context, component string) error {
 
 // GetListenerAddress implements the envelope.EnvelopeHandler interface.
 func (b *babysitter) GetListenerAddress(_ context.Context, request *protos.GetListenerAddressRequest) (*protos.GetListenerAddressReply, error) {
-	// The external listeners are prestarted, hence we return the address of
-	// the Kubernetes Service.
-	for _, components := range b.cfg.Components {
-		for _, lis := range components.Listeners {
-			if lis.Name == request.Name {
-				addr := fmt.Sprintf(":%d", lis.ExternalPort)
-				return &protos.GetListenerAddressReply{Address: addr}, nil
-			}
-		}
+	port, ok := b.cfg.Listeners[request.Name]
+	if !ok {
+		return nil, fmt.Errorf("listener %q not found", request.Name)
 	}
-	return &protos.GetListenerAddressReply{}, nil
+	return &protos.GetListenerAddressReply{Address: fmt.Sprintf(":%d", port)}, nil
 }
 
 // ExportListener implements the envelope.EnvelopeHandler interface.
@@ -306,11 +276,15 @@ func (b *babysitter) HandleLogEntry(_ context.Context, entry *protos.LogEntry) e
 }
 
 // HandleTraceSpans implements the envelope.EnvelopeHandler interface.
-func (b *babysitter) HandleTraceSpans(_ context.Context, spans *protos.TraceSpans) error {
-	if b.exportTraces == nil {
+func (b *babysitter) HandleTraceSpans(ctx context.Context, spans *protos.TraceSpans) error {
+	if b.traceExporter == nil {
 		return nil
 	}
-	return b.exportTraces(spans)
+	var spansToExport []trace.ReadOnlySpan
+	for _, span := range spans.Span {
+		spansToExport = append(spansToExport, &traces.ReadSpan{Span: span})
+	}
+	return b.traceExporter.ExportSpans(ctx, spansToExport)
 }
 
 // GetSelfCertificate implements the envelope.EnvelopeHandler interface.

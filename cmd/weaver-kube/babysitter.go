@@ -16,11 +16,17 @@ package main
 
 import (
 	"context"
+	"errors"
 	"flag"
 	"fmt"
+	"os"
 
 	"github.com/ServiceWeaver/weaver-kube/internal/impl"
+	"github.com/ServiceWeaver/weaver/runtime"
+	"github.com/ServiceWeaver/weaver/runtime/codegen"
+	"github.com/ServiceWeaver/weaver/runtime/protos"
 	"github.com/ServiceWeaver/weaver/runtime/tool"
+	"google.golang.org/protobuf/encoding/prototext"
 )
 
 var babysitterFlags = flag.NewFlagSet("babysitter", flag.ContinueOnError)
@@ -30,15 +36,61 @@ var babysitterCmd = tool.Command{
 	Flags:       babysitterFlags,
 	Description: "The weaver kubernetes babysitter",
 	Help: `Usage:
-  weaver kube babysitter
+  weaver kube babysitter <weaver config file> <babysitter config file> <component>...
 
 Flags:
   -h, --help   Print this help message.`,
 	Fn: func(ctx context.Context, args []string) error {
-		if len(args) != 0 {
-			return fmt.Errorf("usage: weaver kube babysitter")
+		// Parse command line arguments.
+		if len(args) < 3 {
+			return fmt.Errorf("want >= 3 arguments, got %d", len(args))
 		}
-		return impl.RunBabysitter(ctx)
+		app, err := parseWeaverConfig(args[0])
+		if err != nil {
+			return err
+		}
+		config, err := parseBabysitterConfig(args[1])
+		if err != nil {
+			return err
+		}
+		components := args[2:]
+
+		// Create the babysitter.
+		b, err := impl.NewBabysitter(ctx, app, config, components)
+		if err != nil {
+			return err
+		}
+
+		// Run the babysitter.
+		return b.Serve()
 	},
 	Hidden: true,
+}
+
+// parseWeaverConfig parses a weaver.toml config file.
+func parseWeaverConfig(filename string) (*protos.AppConfig, error) {
+	contents, err := os.ReadFile(filename)
+	if err != nil {
+		return nil, fmt.Errorf("read config file %q: %w", filename, err)
+	}
+	app, err := runtime.ParseConfig(filename, string(contents), codegen.ComponentConfigValidator)
+	if err != nil {
+		return nil, fmt.Errorf("parse config file %q: %w", filename, err)
+	}
+	if _, err := os.Stat(app.Binary); errors.Is(err, os.ErrNotExist) {
+		return nil, fmt.Errorf("binary %q doesn't exist", app.Binary)
+	}
+	return app, nil
+}
+
+// parseBabysitterConfig parses a config.textpb config file containing a
+// BabysitterConfig.
+func parseBabysitterConfig(filename string) (*impl.BabysitterConfig, error) {
+	contents, err := os.ReadFile(filename)
+	if err != nil {
+		return nil, fmt.Errorf("read config file %q: %w", filename, err)
+	}
+	var config impl.BabysitterConfig
+	err = prototext.Unmarshal(contents, &config)
+	return &config, err
 }
