@@ -64,6 +64,15 @@ func Deploy(ctx context.Context, configFilename string) error {
 	if config.ServiceAccount == "" {
 		config.ServiceAccount = "default"
 	}
+
+	// Validate the probe options.
+	if err := checkProbeOptions(config.LivenessProbeOpts); err != nil {
+		return fmt.Errorf("invalid liveness probe spec: %w", err)
+	}
+	if err := checkProbeOptions(config.ReadinessProbeOpts); err != nil {
+		return fmt.Errorf("invalid readiness probe spec: %w", err)
+	}
+
 	binListeners, err := bin.ReadListeners(app.Binary)
 	if err != nil {
 		return fmt.Errorf("cannot read listeners from binary %s: %w", app.Binary, err)
@@ -135,6 +144,39 @@ func checkVersionCompatibility(appBinary string) error {
 	Then, re-build your code and re-run 'weaver-kube deploy'. If the problem
 	persists, please file an issue at https://github.com/ServiceWeaver/weaver/issues`,
 			relativize(appBinary), versions.ModuleVersion, selfVersion)
+	}
+	return nil
+}
+
+// checkProbeOptions validates the configuration options for the probes.
+func checkProbeOptions(opts *probeOptions) error {
+	if opts == nil {
+		return nil
+	}
+	// Check that exactly one of the probe handlers is set.
+	phSet := 0
+	if opts.Http != nil {
+		phSet++
+	}
+	if opts.Tcp != nil {
+		phSet++
+	}
+	if opts.Exec != nil {
+		phSet++
+	}
+	if phSet != 1 {
+		return fmt.Errorf("exactly one probe handler should be specified; %d provided", phSet)
+	}
+
+	// Validate the handlers.
+	if opts.Http != nil && (opts.Http.Port < 1 || opts.Http.Port > 65535) {
+		return fmt.Errorf("http handler: invalid port %d", opts.Http.Port)
+	}
+	if opts.Tcp != nil && (opts.Tcp.Port < 1 || opts.Tcp.Port > 65535) {
+		return fmt.Errorf("tcp handler: invalid port %d", opts.Tcp.Port)
+	}
+	if opts.Exec != nil && len(opts.Exec.Cmd) == 0 {
+		return fmt.Errorf("exec handler: no commands specified")
 	}
 	return nil
 }

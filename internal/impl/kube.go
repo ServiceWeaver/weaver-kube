@@ -311,7 +311,7 @@ func (r *replicaSet) buildContainer(cfg *kubeConfig) (corev1.Container, error) {
 		return corev1.Container{}, err
 	}
 
-	return corev1.Container{
+	c := corev1.Container{
 		Name:            appContainerName,
 		Image:           r.image,
 		ImagePullPolicy: corev1.PullIfNotPresent,
@@ -326,7 +326,49 @@ func (r *replicaSet) buildContainer(cfg *kubeConfig) (corev1.Container, error) {
 		// for debugging.
 		TTY:   true,
 		Stdin: true,
-	}, nil
+	}
+
+	createProbeFn := func(opts *probeOptions) *corev1.Probe {
+		probe := &corev1.Probe{}
+		if opts.TimeoutSecs > 0 {
+			probe.TimeoutSeconds = opts.TimeoutSecs
+		}
+		if opts.PeriodSecs > 0 {
+			probe.PeriodSeconds = opts.PeriodSecs
+		}
+		if opts.SuccessThreshold > 0 {
+			probe.SuccessThreshold = opts.SuccessThreshold
+		}
+		if opts.FailureThreshold > 0 {
+			probe.FailureThreshold = opts.FailureThreshold
+		}
+		if opts.Tcp != nil {
+			probe.TCPSocket = &corev1.TCPSocketAction{Port: intstr.IntOrString{IntVal: opts.Tcp.Port}}
+		}
+		if opts.Http != nil {
+			probe.HTTPGet = &corev1.HTTPGetAction{Port: intstr.IntOrString{IntVal: opts.Http.Port}}
+			if opts.Http.Path != "" {
+				// If no path specified, the HTTPGetAction will do health checks on "/".
+				probe.HTTPGet.Path = opts.Http.Path
+			}
+		}
+		if opts.Exec != nil {
+			// Command is optional for an ExecAction. However, it's confusing why that's
+			// the case, especially that this is the only parameter to configure for an
+			// ExecAction.
+			probe.Exec = &corev1.ExecAction{Command: opts.Exec.Cmd}
+		}
+		return probe
+	}
+
+	// Add probes if any.
+	if cfg.LivenessProbeOpts != nil {
+		c.LivenessProbe = createProbeFn(cfg.LivenessProbeOpts)
+	}
+	if cfg.ReadinessProbeOpts != nil {
+		c.LivenessProbe = createProbeFn(cfg.ReadinessProbeOpts)
+	}
+	return c, nil
 }
 
 // generateYAMLs generates Kubernetes YAML configurations for a given
