@@ -25,10 +25,10 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/ServiceWeaver/weaver-kube/internal/proto"
 	"github.com/ServiceWeaver/weaver/runtime/bin"
 	"github.com/ServiceWeaver/weaver/runtime/protos"
 	"golang.org/x/exp/maps"
+	"google.golang.org/protobuf/encoding/prototext"
 	appsv1 "k8s.io/api/apps/v1"
 	autoscalingv2 "k8s.io/api/autoscaling/v2"
 	_ "k8s.io/api/autoscaling/v2beta2"
@@ -42,11 +42,6 @@ import (
 const (
 	// Name of the container that hosts the application binary.
 	appContainerName = "serviceweaver"
-
-	// kubeConfigEnvKey is the name of the env variable that contains deployment
-	// information for a babysitter deployed using kube.
-	kubeConfigEnvKey = "SERVICEWEAVER_DEPLOYMENT_CONFIG"
-
 	// The exported port by the Service Weaver services.
 	servicePort = 80
 
@@ -172,6 +167,18 @@ func buildDeployment(d deployment, g group) (*appsv1.Deployment, error) {
 					Containers:         []corev1.Container{container},
 					DNSPolicy:          dnsPolicy,
 					HostNetwork:        d.config.UseHostNetwork,
+					Volumes: []corev1.Volume{
+						{
+							Name: "config",
+							VolumeSource: corev1.VolumeSource{
+								ConfigMap: &corev1.ConfigMapVolumeSource{
+									LocalObjectReference: corev1.LocalObjectReference{
+										Name: configMapName(d.deploymentId),
+									},
+								},
+							},
+						},
+					},
 				},
 			},
 		},
@@ -270,39 +277,6 @@ func buildAutoscaler(d deployment, g group) (*autoscalingv2.HorizontalPodAutosca
 
 // buildContainer builds a container specification for a group.
 func buildContainer(d deployment, g group) (corev1.Container, error) {
-	// Rewrite the app config to point to the binary in the container.
-	d.app.Binary = fmt.Sprintf("/weaver/%s", filepath.Base(d.app.Binary))
-
-	// Create the ReplicaSetConfig passed to the babysitter.
-	//
-	// TODO(mwhittaker): We associate every listener with the first component.
-	// This is technically incorrect, but doesn't affect how the babysitter
-	// runs. This will get simplified when I simplify ReplicaSetConfig.
-	components := make([]*ReplicaSetConfig_Component, len(g.components))
-	for i, component := range g.components {
-		components[i] = &ReplicaSetConfig_Component{Name: component}
-	}
-	components[0].Listeners = make([]*ReplicaSetConfig_Listener, len(g.listeners))
-	for i, listener := range g.listeners {
-		components[0].Listeners[i] = &ReplicaSetConfig_Listener{
-			Name:         listener.name,
-			ServiceName:  listener.serviceName,
-			ExternalPort: listener.port,
-			IsPublic:     listener.public,
-		}
-	}
-	configString, err := proto.ToEnv(&ReplicaSetConfig{
-		Namespace:       d.config.Namespace,
-		Name:            g.name,
-		DepId:           d.deploymentId,
-		App:             d.app,
-		TraceServiceUrl: d.traceServiceURL,
-		Components:      components,
-	})
-	if err != nil {
-		return corev1.Container{}, err
-	}
-
 	// Gather the set of ports.
 	var ports []corev1.ContainerPort
 	for _, l := range g.listeners {
@@ -334,12 +308,21 @@ func buildContainer(d deployment, g group) (corev1.Container, error) {
 		Name:            appContainerName,
 		Image:           d.image,
 		ImagePullPolicy: corev1.PullIfNotPresent,
-		Args:            []string{"babysitter"},
-		Env: []corev1.EnvVar{
-			{Name: kubeConfigEnvKey, Value: configString},
+		Args:            append([]string{"babysitter", "/weaver/weaver.toml", "/weaver/config.textpb"}, g.components...),
+		Resources:       resources,
+		Ports:           ports,
+		VolumeMounts: []corev1.VolumeMount{
+			{
+				Name:      "config",
+				MountPath: "/weaver/weaver.toml",
+				SubPath:   "weaver.toml",
+			},
+			{
+				Name:      "config",
+				MountPath: "/weaver/config.textpb",
+				SubPath:   "config.textpb",
+			},
 		},
-		Resources: resources,
-		Ports:     ports,
 
 		// Enabling TTY and Stdin allows the user to run a shell inside the
 		// container, for debugging.
@@ -417,7 +400,7 @@ func buildContainer(d deployment, g group) (corev1.Container, error) {
 //
 //   - If observability services are enabled (e.g., Prometheus, Jaeger), a
 //     Kubernetes Deployment and/or a Service for each observability service.
-func generateYAMLs(image string, app *protos.AppConfig, depId string, cfg *kubeConfig) error {
+func generateYAMLs(configFilename string, app *protos.AppConfig, cfg *kubeConfig, depId, image string) error {
 	fmt.Fprintf(os.Stderr, greenText(), "\nGenerating kube deployment info ...")
 
 	// Form deployment.
@@ -438,6 +421,11 @@ func generateYAMLs(image string, app *protos.AppConfig, depId string, cfg *kubeC
 	// Generate roles and role bindings.
 	if err := generateRolesAndBindings(&b, cfg.Namespace, cfg.ServiceAccount); err != nil {
 		return fmt.Errorf("unable to generate roles and bindings: %w", err)
+	}
+
+	// Generate configuration ConfigMap.
+	if err := generateConfigMap(&b, configFilename, d); err != nil {
+		return fmt.Errorf("unable to generate configuration ConfigMap: %w", err)
 	}
 
 	// Generate core YAMLs (deployments, services, autoscalers).
@@ -607,6 +595,59 @@ func generateRolesAndBindings(w io.Writer, namespace, serviceAccount string) err
 		return err
 	}
 	fmt.Fprintf(os.Stderr, "Generated roles and bindings\n")
+	return nil
+}
+
+// configMapName returns the name of the configuration ConfigMap.
+func configMapName(deploymentId string) string {
+	return fmt.Sprintf("config-%s", deploymentId[:8])
+}
+
+// generateConfigMap generates the ConfigMap used to configure an application.
+// configFilename is the name of the weaver.toml configuration file.
+func generateConfigMap(w io.Writer, configFilename string, d deployment) error {
+	// Read weaver.toml.
+	weaverToml, err := os.ReadFile(configFilename)
+	if err != nil {
+		return err
+	}
+
+	// Form config.textpb.
+	listeners := map[string]int32{}
+	for _, g := range d.groups {
+		for _, lis := range g.listeners {
+			listeners[lis.name] = lis.port
+		}
+	}
+	babysitterConfig := &BabysitterConfig{
+		Namespace:       d.config.Namespace,
+		DeploymentId:    d.deploymentId,
+		TraceServiceUrl: d.traceServiceURL,
+		Listeners:       listeners,
+	}
+	configTextpb, err := prototext.MarshalOptions{Multiline: true}.Marshal(babysitterConfig)
+	if err != nil {
+		return err
+	}
+
+	c := corev1.ConfigMap{
+		TypeMeta: metav1.TypeMeta{
+			Kind:       "ConfigMap",
+			APIVersion: "v1",
+		},
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      configMapName(d.deploymentId),
+			Namespace: d.config.Namespace,
+		},
+		Data: map[string]string{
+			"weaver.toml":   string(weaverToml),
+			"config.textpb": string(configTextpb),
+		},
+	}
+	if err := marshalResource(w, c, "Configuration"); err != nil {
+		return err
+	}
+	fmt.Fprintf(os.Stderr, "Generated configuration ConfigMap\n")
 	return nil
 }
 

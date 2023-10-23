@@ -17,27 +17,11 @@ syntax = "proto3";
 option go_package = "github.com/ServiceWeaver/weaver-kube/internal/impl";
 
 package impl;
-import "runtime/protos/config.proto";
 
-// ReplicaSetConfig contains app deployment information that is needed by a
-// babysitter started using the kube deployer to manage a set of components.
-message ReplicaSetConfig {
-  string namespace = 1;
-  string name = 2;
-  string dep_id = 3;
-  runtime.AppConfig app = 4;
-  string trace_service_url = 6;
-
-  // Components hosted by the replica sets, and their network listeners.
-  message Component {
-    string name = 1;
-    repeated Listener listeners = 2;
-  }
-  message Listener {
-    string name = 1;
-    string service_name = 2;
-    int32 external_port = 3;
-    bool is_public = 4;
-  }
-  repeated Component components = 7;
+// BabysitterConfig contains configuration passed to a babysitter.
+message BabysitterConfig {
+  string namespace = 1;              // Kubernetes namespace
+  string deployment_id = 2;          // globally unique deployment id
+  string trace_service_url = 3;      // if not empty, where to send traces
+  map<string, int32> listeners = 4;  // a map from listener name to port
 }
