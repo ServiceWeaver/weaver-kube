@@ -381,11 +381,11 @@ func buildContainer(d deployment, g group) (corev1.Container, error) {
 	}
 
 	// Add probes if any.
-	if cfg.LivenessProbeOpts != nil {
-		c.LivenessProbe = createProbeFn(cfg.LivenessProbeOpts)
+	if d.config.LivenessProbeOpts != nil {
+		c.LivenessProbe = createProbeFn(d.config.LivenessProbeOpts)
 	}
-	if cfg.ReadinessProbeOpts != nil {
-		c.LivenessProbe = createProbeFn(cfg.ReadinessProbeOpts)
+	if d.config.ReadinessProbeOpts != nil {
+		c.LivenessProbe = createProbeFn(d.config.ReadinessProbeOpts)
 	}
 	return c, nil
 }
