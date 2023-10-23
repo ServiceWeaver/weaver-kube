@@ -20,6 +20,7 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	"path/filepath"
 
 	"github.com/ServiceWeaver/weaver-kube/internal/impl"
 	"github.com/ServiceWeaver/weaver/runtime"
@@ -77,6 +78,8 @@ func parseWeaverConfig(filename string) (*protos.AppConfig, error) {
 	if err != nil {
 		return nil, fmt.Errorf("parse config file %q: %w", filename, err)
 	}
+	// Rewrite the app config to point to the binary in the container.
+	app.Binary = fmt.Sprintf("/weaver/%s", filepath.Base(app.Binary))
 	if _, err := os.Stat(app.Binary); errors.Is(err, os.ErrNotExist) {
 		return nil, fmt.Errorf("binary %q doesn't exist", app.Binary)
 	}

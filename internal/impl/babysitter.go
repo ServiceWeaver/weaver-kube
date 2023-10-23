@@ -68,9 +68,6 @@ type babysitter struct {
 }
 
 func NewBabysitter(ctx context.Context, app *protos.AppConfig, config *BabysitterConfig, components []string) (*babysitter, error) {
-	// Rewrite the app config to point to the binary in the container.
-	app.Binary = fmt.Sprintf("/weaver/%s", filepath.Base(app.Binary))
-
 	// Create the envelope.
 	wlet := &protos.EnvelopeInfo{
 		App:             app.Name,
