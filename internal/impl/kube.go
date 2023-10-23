@@ -492,15 +492,15 @@ func header(d deployment, filename string) (string, error) {
 #
 # To view the deployed resources, run:
 #
-#     kubectl get all --selector=version={{.Version}}
+#     kubectl get all,configmaps --selector=serviceweaver/version={{.Version}}
 #
 # To view a description of every resource, run:
 #
-#     kubectl get all -o custom-columns=KIND:.kind,NAME:.metadata.name,APP:.metadata.labels.serviceweaver/app,VERSION:.metadata.labels.serviceweaver/version,DESCRIPTION:.metadata.annotations.description
+#     kubectl get all,configmaps --selector=serviceweaver/version={{.Version}} -o custom-columns=KIND:.kind,NAME:.metadata.name,APP:.metadata.labels.serviceweaver/app,VERSION:.metadata.labels.serviceweaver/version,DESCRIPTION:.metadata.annotations.description
 #
 # To delete the resources, run:
 #
-#     kubectl delete all --selector=version={{.Version}}
+#     kubectl delete all,configmaps --selector=serviceweaver/version={{.Version}}
 
 `))
 
@@ -638,6 +638,13 @@ func generateConfigMap(w io.Writer, configFilename string, d deployment) error {
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      configMapName(d.deploymentId),
 			Namespace: d.config.Namespace,
+			Labels: map[string]string{
+				"serviceweaver/app":     d.app.Name,
+				"serviceweaver/version": d.deploymentId[:8],
+			},
+			Annotations: map[string]string{
+				"description": fmt.Sprintf("This ConfigMap contains config files for app %q version %q.", d.app.Name, d.deploymentId[:8]),
+			},
 		},
 		Data: map[string]string{
 			"weaver.toml":   string(weaverToml),
