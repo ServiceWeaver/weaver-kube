@@ -68,12 +68,12 @@ type deployment struct {
 	traceServiceURL string            // where traces are exported to, if not empty
 	config          *kubeConfig       // [kube] config from weaver.toml
 	app             *protos.AppConfig // parsed weaver.toml
-	nodes           []node            // nodes
+	groups          []group           // groups
 }
 
-// node contains information about a possibly replicated group of components.
-type node struct {
-	name       string     // node name
+// group contains information about a possibly replicated group of components.
+type group struct {
+	name       string     // group name
 	components []string   // hosted components
 	listeners  []listener // hosted listeners
 }
@@ -107,14 +107,14 @@ func deploymentName(app, component, deploymentId string) string {
 	return fmt.Sprintf("%s-%s-%s", shortened, deploymentId[:8], hash)
 }
 
-// buildDeployment generates a Kubernetes Deployment for a node.
+// buildDeployment generates a Kubernetes Deployment for a group.
 //
 // TODO(rgrandl): test to see if it works with an app where a component foo is
 // collocated with main, and a component bar that is not collocated with main
 // calls foo.
-func buildDeployment(d deployment, n node) (*appsv1.Deployment, error) {
+func buildDeployment(d deployment, g group) (*appsv1.Deployment, error) {
 	// Create labels.
-	name := deploymentName(d.app.Name, n.name, d.deploymentId)
+	name := deploymentName(d.app.Name, g.name, d.deploymentId)
 	podLabels := map[string]string{
 		"serviceweaver/name":    name,
 		"serviceweaver/app":     d.app.Name,
@@ -131,7 +131,7 @@ func buildDeployment(d deployment, n node) (*appsv1.Deployment, error) {
 	}
 
 	// Create container.
-	container, err := buildContainer(d, n)
+	container, err := buildContainer(d, g)
 	if err != nil {
 		return nil, err
 	}
@@ -150,7 +150,7 @@ func buildDeployment(d deployment, n node) (*appsv1.Deployment, error) {
 				"serviceweaver/version": d.deploymentId[:8],
 			},
 			Annotations: map[string]string{
-				"description": fmt.Sprintf("This Deployment hosts components %v.", strings.Join(n.components, ", ")),
+				"description": fmt.Sprintf("This Deployment hosts components %v.", strings.Join(g.components, ", ")),
 			},
 		},
 		Spec: appsv1.DeploymentSpec{
@@ -164,7 +164,7 @@ func buildDeployment(d deployment, n node) (*appsv1.Deployment, error) {
 					Labels:    podLabels,
 					Namespace: d.config.Namespace,
 					Annotations: map[string]string{
-						"description": fmt.Sprintf("This Pod hosts components %v.", strings.Join(n.components, ", ")),
+						"description": fmt.Sprintf("This Pod hosts components %v.", strings.Join(g.components, ", ")),
 					},
 				},
 				Spec: corev1.PodSpec{
@@ -183,7 +183,7 @@ func buildDeployment(d deployment, n node) (*appsv1.Deployment, error) {
 // Note that for public listeners, we generate a Load Balancer service because
 // it has to be reachable from the outside; for internal listeners, we generate
 // a ClusterIP service, reachable only from internal Service Weaver services.
-func buildListenerService(d deployment, n node, lis listener) (*corev1.Service, error) {
+func buildListenerService(d deployment, g group, lis listener) (*corev1.Service, error) {
 	serviceType := "ClusterIP"
 	if lis.public {
 		serviceType = "LoadBalancer"
@@ -209,7 +209,7 @@ func buildListenerService(d deployment, n node, lis listener) (*corev1.Service, 
 		Spec: corev1.ServiceSpec{
 			Type: corev1.ServiceType(serviceType),
 			Selector: map[string]string{
-				"serviceweaver/name": deploymentName(d.app.Name, n.name, d.deploymentId),
+				"serviceweaver/name": deploymentName(d.app.Name, g.name, d.deploymentId),
 			},
 			Ports: []corev1.ServicePort{
 				{
@@ -222,10 +222,10 @@ func buildListenerService(d deployment, n node, lis listener) (*corev1.Service, 
 	}, nil
 }
 
-// buildAutoscaler generates a Kubernetes HorizontalPodAutoscaler for a node.
-func buildAutoscaler(d deployment, n node) (*autoscalingv2.HorizontalPodAutoscaler, error) {
+// buildAutoscaler generates a Kubernetes HorizontalPodAutoscaler for a group.
+func buildAutoscaler(d deployment, g group) (*autoscalingv2.HorizontalPodAutoscaler, error) {
 	// Per deployment name that is app version specific.
-	name := deploymentName(d.app.Name, n.name, d.deploymentId)
+	name := deploymentName(d.app.Name, g.name, d.deploymentId)
 	return &autoscalingv2.HorizontalPodAutoscaler{
 		TypeMeta: metav1.TypeMeta{
 			APIVersion: "autoscaling/v2",
@@ -268,8 +268,8 @@ func buildAutoscaler(d deployment, n node) (*autoscalingv2.HorizontalPodAutoscal
 	}, nil
 }
 
-// buildContainer builds a container specification for a node.
-func buildContainer(d deployment, n node) (corev1.Container, error) {
+// buildContainer builds a container specification for a group.
+func buildContainer(d deployment, g group) (corev1.Container, error) {
 	// Rewrite the app config to point to the binary in the container.
 	d.app.Binary = fmt.Sprintf("/weaver/%s", filepath.Base(d.app.Binary))
 
@@ -278,12 +278,12 @@ func buildContainer(d deployment, n node) (corev1.Container, error) {
 	// TODO(mwhittaker): We associate every listener with the first component.
 	// This is technically incorrect, but doesn't affect how the babysitter
 	// runs. This will get simplified when I simplify ReplicaSetConfig.
-	components := make([]*ReplicaSetConfig_Component, len(n.components))
-	for i, component := range n.components {
+	components := make([]*ReplicaSetConfig_Component, len(g.components))
+	for i, component := range g.components {
 		components[i] = &ReplicaSetConfig_Component{Name: component}
 	}
-	components[0].Listeners = make([]*ReplicaSetConfig_Listener, len(n.listeners))
-	for i, listener := range n.listeners {
+	components[0].Listeners = make([]*ReplicaSetConfig_Listener, len(g.listeners))
+	for i, listener := range g.listeners {
 		components[0].Listeners[i] = &ReplicaSetConfig_Listener{
 			Name:         listener.name,
 			ServiceName:  listener.serviceName,
@@ -293,7 +293,7 @@ func buildContainer(d deployment, n node) (corev1.Container, error) {
 	}
 	configString, err := proto.ToEnv(&ReplicaSetConfig{
 		Namespace:       d.config.Namespace,
-		Name:            n.name,
+		Name:            g.name,
 		DepId:           d.deploymentId,
 		App:             d.app,
 		TraceServiceUrl: d.traceServiceURL,
@@ -305,7 +305,7 @@ func buildContainer(d deployment, n node) (corev1.Container, error) {
 
 	// Gather the set of ports.
 	var ports []corev1.ContainerPort
-	for _, l := range n.listeners {
+	for _, l := range g.listeners {
 		ports = append(ports, corev1.ContainerPort{
 			Name:          l.name,
 			ContainerPort: l.port,
@@ -523,15 +523,15 @@ func header(d deployment, filename string) (string, error) {
 	}
 
 	// Compute groups.
-	groups := make([][]string, len(d.nodes))
-	for i, n := range d.nodes {
-		groups[i] = n.components
+	groups := make([][]string, len(d.groups))
+	for i, g := range d.groups {
+		groups[i] = g.components
 	}
 
 	// Compute listeners.
 	var listeners []string
-	for _, n := range d.nodes {
-		for _, lis := range n.listeners {
+	for _, g := range d.groups {
+		for _, lis := range g.listeners {
 			listeners = append(listeners, lis.name)
 		}
 	}
@@ -612,40 +612,40 @@ func generateRolesAndBindings(w io.Writer, namespace, serviceAccount string) err
 
 // generateCoreYAMLs generates the core YAMLs for the given deployment.
 func generateCoreYAMLs(w io.Writer, d deployment) error {
-	// For each node, build a deployment and an autoscaler. If a node has any
+	// For each group, build a deployment and an autoscaler. If a group has any
 	// listeners, build a service for each listener.
-	for _, n := range d.nodes {
+	for _, g := range d.groups {
 		// Build a Service for each listener.
-		for _, lis := range n.listeners {
-			service, err := buildListenerService(d, n, lis)
+		for _, lis := range g.listeners {
+			service, err := buildListenerService(d, g, lis)
 			if err != nil {
 				return fmt.Errorf("unable to create kube listener service for %s: %w", lis.name, err)
 			}
-			if err := marshalResource(w, service, fmt.Sprintf("Listener Service for node %s", n.name)); err != nil {
+			if err := marshalResource(w, service, fmt.Sprintf("Listener Service for group %s", g.name)); err != nil {
 				return err
 			}
 			fmt.Fprintf(os.Stderr, "Generated kube listener service for listener %v\n", lis.name)
 		}
 
-		// Build a Deployment for the node.
-		deployment, err := buildDeployment(d, n)
+		// Build a Deployment for the group.
+		deployment, err := buildDeployment(d, g)
 		if err != nil {
-			return fmt.Errorf("unable to create kube deployment for node %s: %w", n.name, err)
+			return fmt.Errorf("unable to create kube deployment for group %s: %w", g.name, err)
 		}
-		if err := marshalResource(w, deployment, fmt.Sprintf("Deployment for node %s", n.name)); err != nil {
+		if err := marshalResource(w, deployment, fmt.Sprintf("Deployment for group %s", g.name)); err != nil {
 			return err
 		}
-		fmt.Fprintf(os.Stderr, "Generated kube deployment for node %v\n", n.name)
+		fmt.Fprintf(os.Stderr, "Generated kube deployment for group %v\n", g.name)
 
 		// Build autoscaler HorizontalPodAutoscaler for the Deployment.
-		autoscaler, err := buildAutoscaler(d, n)
+		autoscaler, err := buildAutoscaler(d, g)
 		if err != nil {
-			return fmt.Errorf("unable to create kube autoscaler for node %s: %w", n.name, err)
+			return fmt.Errorf("unable to create kube autoscaler for group %s: %w", g.name, err)
 		}
-		if err := marshalResource(w, autoscaler, fmt.Sprintf("Autoscaler for node %s", n.name)); err != nil {
+		if err := marshalResource(w, autoscaler, fmt.Sprintf("Autoscaler for group %s", g.name)); err != nil {
 			return err
 		}
-		fmt.Fprintf(os.Stderr, "Generated kube autoscaler for node %v\n", n.name)
+		fmt.Fprintf(os.Stderr, "Generated kube autoscaler for group %v\n", g.name)
 	}
 	return nil
 }
@@ -666,31 +666,31 @@ func newDeployment(app *protos.AppConfig, cfg *kubeConfig, depId, image string) 
 		}
 	}
 
-	// Form nodes based on groups.
-	nodesByName := map[string]node{}
+	// Form groups.
+	groupsByName := map[string]group{}
 	for component, listeners := range components {
-		// We use the first component in a group as the name of the node.
+		// We use the first component in a group as the name of the group.
 		name := component
 		if group, ok := groups[component]; ok {
 			name = group.Components[0]
 		}
 
-		// Append the component and listeners to the node.
-		n, ok := nodesByName[name]
+		// Append the component and listeners to the group.
+		g, ok := groupsByName[name]
 		if !ok {
-			n = node{name: name}
+			g = group{name: name}
 		}
-		n.components = append(n.components, component)
+		g.components = append(g.components, component)
 		for _, name := range listeners {
-			n.listeners = append(n.listeners, newListener(depId, cfg, name))
+			g.listeners = append(g.listeners, newListener(depId, cfg, name))
 		}
-		nodesByName[name] = n
+		groupsByName[name] = g
 	}
 
-	// Sort nodes by name to ensure stable YAML.
-	nodes := maps.Values(nodesByName)
-	sort.Slice(nodes, func(i, j int) bool {
-		return nodes[i].name < nodes[j].name
+	// Sort groups by name to ensure stable YAML.
+	sorted := maps.Values(groupsByName)
+	sort.Slice(sorted, func(i, j int) bool {
+		return sorted[i].name < sorted[j].name
 	})
 
 	// Compute the URL of the export traces service.
@@ -712,7 +712,7 @@ func newDeployment(app *protos.AppConfig, cfg *kubeConfig, depId, image string) 
 		traceServiceURL: traceServiceURL,
 		config:          cfg,
 		app:             app,
-		nodes:           nodes,
+		groups:          sorted,
 	}, nil
 
 }
