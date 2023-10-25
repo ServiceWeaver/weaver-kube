@@ -18,13 +18,12 @@ import (
 	"bytes"
 	"context"
 	"fmt"
-	"log/slog"
 	"net"
 	"net/http"
 	"os"
-	"path/filepath"
 	"slices"
 	"sync"
+	"time"
 
 	"github.com/ServiceWeaver/weaver/runtime"
 	"github.com/ServiceWeaver/weaver/runtime/envelope"
@@ -32,7 +31,9 @@ import (
 	"github.com/ServiceWeaver/weaver/runtime/metrics"
 	"github.com/ServiceWeaver/weaver/runtime/prometheus"
 	"github.com/ServiceWeaver/weaver/runtime/protos"
+	"github.com/ServiceWeaver/weaver/runtime/traces"
 	"github.com/google/uuid"
+	"go.opentelemetry.io/otel/sdk/trace"
 	"golang.org/x/sync/errgroup"
 	v1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -46,16 +47,20 @@ import (
 // [1] https://prometheus.io
 const prometheusEndpoint = "/metrics"
 
-// The directory where "weaver kube" stores data.
-var logDir = filepath.Join(runtime.LogsDir(), "kube")
+// BabysitterOptions configure a babysitter. See tool.Plugins for details.
+type BabysitterOptions struct {
+	HandleLogEntry   func(context.Context, *protos.LogEntry) error
+	HandleTraceSpans func(context.Context, []trace.ReadOnlySpan) error
+	HandleMetrics    func(context.Context, []*metrics.MetricSnapshot) error
+}
 
 // babysitter starts and manages a weavelet inside the Pod.
 type babysitter struct {
 	ctx       context.Context
 	cfg       *BabysitterConfig
+	opts      BabysitterOptions
 	app       *protos.AppConfig
 	envelope  *envelope.Envelope
-	logger    *slog.Logger
 	clientset *kubernetes.Clientset
 	printer   *logging.PrettyPrinter
 
@@ -63,7 +68,7 @@ type babysitter struct {
 	watching map[string]struct{} // components being watched
 }
 
-func NewBabysitter(ctx context.Context, app *protos.AppConfig, config *BabysitterConfig, components []string) (*babysitter, error) {
+func NewBabysitter(ctx context.Context, app *protos.AppConfig, config *BabysitterConfig, components []string, opts BabysitterOptions) (*babysitter, error) {
 	// Create the envelope.
 	wlet := &protos.EnvelopeInfo{
 		App:             app.Name,
@@ -78,23 +83,7 @@ func NewBabysitter(ctx context.Context, app *protos.AppConfig, config *Babysitte
 		return nil, fmt.Errorf("NewBabysitter: create envelope: %w", err)
 	}
 
-	// Create the logger.
-	fs, err := logging.NewFileStore(logDir)
-	if err != nil {
-		return nil, fmt.Errorf("NewBabysitter: create logger: %w", err)
-	}
-	logSaver := fs.Add
-	logger := slog.New(&logging.LogHandler{
-		Opts: logging.Options{
-			App:       app.Name,
-			Component: "deployer",
-			Weavelet:  uuid.NewString(),
-			Attrs:     []string{"serviceweaver/system", ""},
-		},
-		Write: logSaver,
-	})
-
-	// Create a Kubernetes config.
+	// Create a Kubernetes client set.
 	kubeConfig, err := rest.InClusterConfig()
 	if err != nil {
 		return nil, fmt.Errorf("NewBabysitter: get kube config: %w", err)
@@ -108,12 +97,16 @@ func NewBabysitter(ctx context.Context, app *protos.AppConfig, config *Babysitte
 	b := &babysitter{
 		ctx:       ctx,
 		cfg:       config,
+		opts:      opts,
 		app:       app,
 		envelope:  e,
-		logger:    logger,
 		clientset: clientset,
-		printer:   logging.NewPrettyPrinter(false /*colors disabled*/),
 		watching:  map[string]struct{}{},
+	}
+
+	// Create the pretty printer for logging, if there is no log handler.
+	if opts.HandleLogEntry == nil {
+		b.printer = logging.NewPrettyPrinter(false /*colors disabled*/)
 	}
 
 	// Inform the weavelet of the components it should host.
@@ -125,23 +118,42 @@ func NewBabysitter(ctx context.Context, app *protos.AppConfig, config *Babysitte
 }
 
 func (b *babysitter) Serve() error {
-	// Run an HTTP server that exports metrics.
-	lis, err := net.Listen("tcp", fmt.Sprintf(":%d", prometheusPort))
-	if err != nil {
-		return fmt.Errorf("Babysitter.Serve: listen on port %d: %w", prometheusPort, err)
+	group, ctx := errgroup.WithContext(b.ctx)
+
+	if b.opts.HandleMetrics == nil {
+		// Run an HTTP server that exports metrics.
+		lis, err := net.Listen("tcp", fmt.Sprintf(":%d", prometheusPort))
+		if err != nil {
+			return fmt.Errorf("babysitter.Serve: listen on port %d: %w", prometheusPort, err)
+		}
+		mux := http.NewServeMux()
+		mux.HandleFunc(prometheusEndpoint, func(w http.ResponseWriter, r *http.Request) {
+			// Read the metrics.
+			metrics := b.readMetrics()
+			var b bytes.Buffer
+			prometheus.TranslateMetricsToPrometheusTextFormat(&b, metrics, r.Host, prometheusEndpoint)
+			w.Write(b.Bytes()) //nolint:errcheck // response write error
+		})
+		group.Go(func() error {
+			return serveHTTP(ctx, lis, mux)
+		})
+	} else {
+		// Periodically call b.opts.HandleMetrics with the set of metrics.
+		group.Go(func() error {
+			ticker := time.NewTimer(time.Second)
+			defer ticker.Stop()
+			for {
+				select {
+				case <-ctx.Done():
+					return ctx.Err()
+				case <-ticker.C:
+					if err := b.opts.HandleMetrics(ctx, b.readMetrics()); err != nil {
+						return err
+					}
+				}
+			}
+		})
 	}
-	mux := http.NewServeMux()
-	mux.HandleFunc(prometheusEndpoint, func(w http.ResponseWriter, r *http.Request) {
-		// Read the metrics.
-		metrics := b.readMetrics()
-		var b bytes.Buffer
-		prometheus.TranslateMetricsToPrometheusTextFormat(&b, metrics, r.Host, prometheusEndpoint)
-		w.Write(b.Bytes()) //nolint:errcheck // response write error
-	})
-	var group errgroup.Group
-	group.Go(func() error {
-		return serveHTTP(b.ctx, lis, mux)
-	})
 
 	// Run the envelope and handle messages from the weavelet.
 	group.Go(func() error {
@@ -248,15 +260,25 @@ func (b *babysitter) ExportListener(context.Context, *protos.ExportListenerReque
 }
 
 // HandleLogEntry implements the envelope.EnvelopeHandler interface.
-func (b *babysitter) HandleLogEntry(_ context.Context, entry *protos.LogEntry) error {
+func (b *babysitter) HandleLogEntry(ctx context.Context, entry *protos.LogEntry) error {
+	if b.opts.HandleLogEntry != nil {
+		return b.opts.HandleLogEntry(ctx, entry)
+	}
 	fmt.Println(b.printer.Format(entry))
 	return nil
 }
 
 // HandleTraceSpans implements the envelope.EnvelopeHandler interface.
 func (b *babysitter) HandleTraceSpans(ctx context.Context, spans *protos.TraceSpans) error {
-	// TODO(mwhittaker): Implement with plugins.
-	return nil
+	if b.opts.HandleTraceSpans == nil {
+		return nil
+	}
+
+	var spansToExport []trace.ReadOnlySpan
+	for _, span := range spans.Span {
+		spansToExport = append(spansToExport, &traces.ReadSpan{Span: span})
+	}
+	return b.opts.HandleTraceSpans(ctx, spansToExport)
 }
 
 // GetSelfCertificate implements the envelope.EnvelopeHandler interface.

@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-package main
+package tool
 
 import (
 	"context"
@@ -94,7 +94,7 @@ Container Image Names:
 
       [1] https://kubernetes.io/docs/concepts/configuration/manage-resources-containers/
 
-    e) Configure probes [1]. The kube deployer allows you to configure readiness
+    d) Configure probes [1]. The kube deployer allows you to configure readiness
        and liveness probes. For each probe, you can configure:
          - how often to perform the probe "period_secs"
          - how long to wait for a probe to respond before declaring a timeout "timeout_secs"
