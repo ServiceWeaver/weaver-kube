@@ -16,6 +16,7 @@ package impl
 
 import (
 	"bytes"
+	"crypto/sha256"
 	_ "embed"
 	"fmt"
 	"html/template"
@@ -27,6 +28,7 @@ import (
 
 	"github.com/ServiceWeaver/weaver/runtime/bin"
 	"github.com/ServiceWeaver/weaver/runtime/protos"
+	"github.com/google/uuid"
 	"golang.org/x/exp/maps"
 	"google.golang.org/protobuf/encoding/prototext"
 	appsv1 "k8s.io/api/apps/v1"
@@ -37,16 +39,21 @@ import (
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/intstr"
+	"sigs.k8s.io/yaml"
 )
 
 const (
 	// Name of the container that hosts the application binary.
 	appContainerName = "serviceweaver"
+
 	// The exported port by the Service Weaver services.
 	servicePort = 80
 
 	// Port used by the weavelets to listen for internal traffic.
 	internalPort = 10000
+
+	// Default Prometheus port.
+	prometheusPort = 9090
 )
 
 // Start value for ports used by the public and private listeners.
@@ -58,12 +65,11 @@ var externalPort int32 = 20000
 // Note that this is different from a Kubernetes Deployment. A deployed Service
 // Weaver application consists of many Kubernetes Deployments.
 type deployment struct {
-	deploymentId    string            // globally unique deployment id
-	image           string            // Docker image URI
-	traceServiceURL string            // where traces are exported to, if not empty
-	config          *kubeConfig       // [kube] config from weaver.toml
-	app             *protos.AppConfig // parsed weaver.toml
-	groups          []group           // groups
+	deploymentId string            // globally unique deployment id
+	image        string            // Docker image URI
+	config       *kubeConfig       // [kube] config from weaver.toml
+	app          *protos.AppConfig // parsed weaver.toml
+	groups       []group           // groups
 }
 
 // group contains information about a possibly replicated group of components.
@@ -114,9 +120,6 @@ func buildDeployment(d deployment, g group) (*appsv1.Deployment, error) {
 		"serviceweaver/name":    name,
 		"serviceweaver/app":     d.app.Name,
 		"serviceweaver/version": d.deploymentId[:8],
-	}
-	if d.config.Observability[metricsConfigKey] != disabled {
-		podLabels["metrics"] = d.app.Name // Needed by Prometheus to scrape the metrics.
 	}
 
 	// Pick DNS policy.
@@ -285,18 +288,10 @@ func buildContainer(d deployment, g group) (corev1.Container, error) {
 			ContainerPort: l.port,
 		})
 	}
-	if d.config.Observability[metricsConfigKey] != disabled {
-		// Expose the metrics port from the container, so it can be
-		// discoverable for scraping by Prometheus.
-		//
-		// TODO(rgrandl): We may want to have a default metrics port that can
-		// be scraped by any metrics collection system. For now, disable the
-		// port if Prometheus will not collect the metrics.
-		ports = append(ports, corev1.ContainerPort{
-			Name:          "prometheus",
-			ContainerPort: defaultMetricsPort,
-		})
-	}
+	ports = append(ports, corev1.ContainerPort{
+		Name:          "prometheus",
+		ContainerPort: prometheusPort,
+	})
 
 	// Gather the set of resources.
 	resources, err := computeResourceRequirements(d.config.Resources)
@@ -431,11 +426,6 @@ func generateYAMLs(configFilename string, app *protos.AppConfig, cfg *kubeConfig
 	// Generate core YAMLs (deployments, services, autoscalers).
 	if err := generateCoreYAMLs(&b, d); err != nil {
 		return fmt.Errorf("unable to create kube app deployment: %w", err)
-	}
-
-	// Generate deployment info needed to get insights into the application.
-	if err := generateObservabilityYAMLs(&b, app.Name, cfg); err != nil {
-		return fmt.Errorf("unable to create configuration information: %w", err)
 	}
 
 	// Write the generated kube info into a file.
@@ -620,10 +610,9 @@ func generateConfigMap(w io.Writer, configFilename string, d deployment) error {
 		}
 	}
 	babysitterConfig := &BabysitterConfig{
-		Namespace:       d.config.Namespace,
-		DeploymentId:    d.deploymentId,
-		TraceServiceUrl: d.traceServiceURL,
-		Listeners:       listeners,
+		Namespace:    d.config.Namespace,
+		DeploymentId: d.deploymentId,
+		Listeners:    listeners,
 	}
 	configTextpb, err := prototext.MarshalOptions{Multiline: true}.Marshal(babysitterConfig)
 	if err != nil {
@@ -741,26 +730,12 @@ func newDeployment(app *protos.AppConfig, cfg *kubeConfig, depId, image string) 
 		return sorted[i].name < sorted[j].name
 	})
 
-	// Compute the URL of the export traces service.
-	var traceServiceURL string
-	switch jservice := cfg.Observability[tracesConfigKey]; {
-	case jservice == auto:
-		// Point to the service launched by the kube deployer.
-		traceServiceURL = fmt.Sprintf("http://%s:%d/api/traces", name{app.Name, jaegerAppName}.DNSLabel(), defaultJaegerCollectorPort)
-	case jservice != disabled:
-		// Point to the service launched by the user.
-		traceServiceURL = fmt.Sprintf("http://%s:%d/api/traces", jservice, defaultJaegerCollectorPort)
-	default:
-		// No trace to export.
-	}
-
 	return deployment{
-		deploymentId:    depId,
-		image:           image,
-		traceServiceURL: traceServiceURL,
-		config:          cfg,
-		app:             app,
-		groups:          sorted,
+		deploymentId: depId,
+		image:        image,
+		config:       cfg,
+		app:          app,
+		groups:       sorted,
 	}, nil
 
 }
@@ -854,4 +829,31 @@ func readComponentsAndListeners(binary string) (map[string][]string, error) {
 	}
 
 	return components, nil
+}
+
+// hash8 computes a stable 8-byte hash over the provided strings.
+func hash8(strs []string) string {
+	h := sha256.New()
+	var data []byte
+	for _, str := range strs {
+		h.Write([]byte(str))
+		h.Write(data)
+		data = h.Sum(data)
+	}
+	return uuid.NewHash(h, uuid.Nil, data, 0).String()[:8]
+}
+
+// marshalResource marshals the provided Kubernetes resource into YAML into the
+// provided writer, prefixing it with the provided comment.
+func marshalResource(w io.Writer, resource any, comment string) error {
+	bytes, err := yaml.Marshal(resource)
+	if err != nil {
+		return err
+	}
+	fmt.Fprintf(w, "\n# %s\n", comment)
+	if _, err := w.Write(bytes); err != nil {
+		return err
+	}
+	fmt.Fprintf(w, "\n---\n")
+	return nil
 }

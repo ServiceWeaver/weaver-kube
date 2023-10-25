@@ -83,30 +83,7 @@ Container Image Names:
       You can specify any combination of the various options or none. E.g.,
          listeners.foo = {public = true, serice_name = "unique_name"}
 
-    c) Observability - if nothing is specified, the kube deployer will
-       automatically launch Prometheus, Jaeger, Loki and Grafana to retrieve your
-       application's metrics, traces, logs, and to provide custom dashboards.
-
-       If you don't want one or more of these services to run, you can simply
-       disable them. E.g., :
-       [kube.observability]
-       prometheus_service = "none"
-       jaeger_service = "none"
-       loki_service = "none"
-       grafana_service = "none"
-
-       If you want to plugin one or more of your existing Prometheus, Jaeger,
-       Loki, Grafana, you can specify their service name:
-       [kube.observability]
-       prometheus_service = "your_prometheus_service_name"
-       jaeger_service = "your_jaeger_service_name"
-       loki_service = "your_loki_service_name"
-       grafana_service = "your_granfa_service_name"
-
-       Note that we support only the Prometheus, Jaeger, Loki, Grafana stack for
-       observability right now.
-
-    d) Configure resource requirements for the pods [1]. E.g.,
+    c) Configure resource requirements for the pods [1]. E.g.,
       [kube.resources]
       requests_cpu = "200m"
       requests_mem = "256Mi"

@@ -32,10 +32,7 @@ import (
 	"github.com/ServiceWeaver/weaver/runtime/metrics"
 	"github.com/ServiceWeaver/weaver/runtime/prometheus"
 	"github.com/ServiceWeaver/weaver/runtime/protos"
-	"github.com/ServiceWeaver/weaver/runtime/traces"
 	"github.com/google/uuid"
-	"go.opentelemetry.io/otel/exporters/jaeger"
-	"go.opentelemetry.io/otel/sdk/trace"
 	"golang.org/x/sync/errgroup"
 	v1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -54,14 +51,13 @@ var logDir = filepath.Join(runtime.LogsDir(), "kube")
 
 // babysitter starts and manages a weavelet inside the Pod.
 type babysitter struct {
-	ctx           context.Context
-	cfg           *BabysitterConfig
-	app           *protos.AppConfig
-	envelope      *envelope.Envelope
-	logger        *slog.Logger
-	traceExporter *jaeger.Exporter
-	clientset     *kubernetes.Clientset
-	printer       *logging.PrettyPrinter
+	ctx       context.Context
+	cfg       *BabysitterConfig
+	app       *protos.AppConfig
+	envelope  *envelope.Envelope
+	logger    *slog.Logger
+	clientset *kubernetes.Clientset
+	printer   *logging.PrettyPrinter
 
 	mu       sync.Mutex
 	watching map[string]struct{} // components being watched
@@ -98,18 +94,6 @@ func NewBabysitter(ctx context.Context, app *protos.AppConfig, config *Babysitte
 		Write: logSaver,
 	})
 
-	// Create the trace exporter.
-	var traceExporter *jaeger.Exporter
-	if config.TraceServiceUrl != "" {
-		// Export traces if there is a tracing service running that is able to
-		// receive these traces.
-		endpoint := jaeger.WithCollectorEndpoint(jaeger.WithEndpoint(config.TraceServiceUrl))
-		traceExporter, err = jaeger.New(endpoint)
-		if err != nil {
-			return nil, fmt.Errorf("NewBabysitter: create trace exporter: %w", err)
-		}
-	}
-
 	// Create a Kubernetes config.
 	kubeConfig, err := rest.InClusterConfig()
 	if err != nil {
@@ -122,15 +106,14 @@ func NewBabysitter(ctx context.Context, app *protos.AppConfig, config *Babysitte
 
 	// Create the babysitter.
 	b := &babysitter{
-		ctx:           ctx,
-		cfg:           config,
-		app:           app,
-		envelope:      e,
-		logger:        logger,
-		traceExporter: traceExporter,
-		clientset:     clientset,
-		printer:       logging.NewPrettyPrinter(false /*colors disabled*/),
-		watching:      map[string]struct{}{},
+		ctx:       ctx,
+		cfg:       config,
+		app:       app,
+		envelope:  e,
+		logger:    logger,
+		clientset: clientset,
+		printer:   logging.NewPrettyPrinter(false /*colors disabled*/),
+		watching:  map[string]struct{}{},
 	}
 
 	// Inform the weavelet of the components it should host.
@@ -143,9 +126,9 @@ func NewBabysitter(ctx context.Context, app *protos.AppConfig, config *Babysitte
 
 func (b *babysitter) Serve() error {
 	// Run an HTTP server that exports metrics.
-	lis, err := net.Listen("tcp", fmt.Sprintf(":%d", defaultMetricsPort))
+	lis, err := net.Listen("tcp", fmt.Sprintf(":%d", prometheusPort))
 	if err != nil {
-		return fmt.Errorf("Babysitter.Serve: listen on port %d: %w", defaultMetricsPort, err)
+		return fmt.Errorf("Babysitter.Serve: listen on port %d: %w", prometheusPort, err)
 	}
 	mux := http.NewServeMux()
 	mux.HandleFunc(prometheusEndpoint, func(w http.ResponseWriter, r *http.Request) {
@@ -165,9 +148,7 @@ func (b *babysitter) Serve() error {
 		return b.envelope.Serve(b)
 	})
 
-	err = group.Wait()
-	b.traceExporter.Shutdown(b.ctx) //nolint:errcheck // response write error
-	return err
+	return group.Wait()
 }
 
 // ActivateComponent implements the envelope.EnvelopeHandler interface.
@@ -274,14 +255,8 @@ func (b *babysitter) HandleLogEntry(_ context.Context, entry *protos.LogEntry) e
 
 // HandleTraceSpans implements the envelope.EnvelopeHandler interface.
 func (b *babysitter) HandleTraceSpans(ctx context.Context, spans *protos.TraceSpans) error {
-	if b.traceExporter == nil {
-		return nil
-	}
-	var spansToExport []trace.ReadOnlySpan
-	for _, span := range spans.Span {
-		spansToExport = append(spansToExport, &traces.ReadSpan{Span: span})
-	}
-	return b.traceExporter.ExportSpans(ctx, spansToExport)
+	// TODO(mwhittaker): Implement with plugins.
+	return nil
 }
 
 // GetSelfCertificate implements the envelope.EnvelopeHandler interface.
