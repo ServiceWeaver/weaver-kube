@@ -39,7 +39,7 @@ type echoer struct {
 	weaver.Implements[Echoer]
 }
 
-func (e echoer) Echo(ctx context.Context, s string) (string, error) {
+func (e echoer) Echo(_ context.Context, s string) (string, error) {
 	stringLength.Put(float64(len(s))) // Update the stringLength metric.
 	return s, nil
 }

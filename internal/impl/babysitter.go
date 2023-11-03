@@ -160,7 +160,10 @@ func (b *babysitter) watchPods(ctx context.Context, component string) error {
 	b.mu.Unlock()
 
 	// Watch the pods running the requested component.
-	rs := replicaSetName(component, b.app)
+	rs, ok := b.cfg.Groups[component]
+	if !ok {
+		return fmt.Errorf("unable to determine group name for component %s", component)
+	}
 	name := deploymentName(b.app.Name, rs, b.cfg.DeploymentId)
 	opts := metav1.ListOptions{LabelSelector: fmt.Sprintf("serviceweaver/name=%s", name)}
 	watcher, err := b.clientset.CoreV1().Pods(b.cfg.Namespace).Watch(ctx, opts)
@@ -278,17 +281,4 @@ func (b *babysitter) readMetrics() []*metrics.MetricSnapshot {
 		return ms
 	}
 	return append(ms, m...)
-}
-
-// replicaSetName returns the name of the replica set that hosts a given
-// component.
-func replicaSetName(component string, app *protos.AppConfig) string {
-	for _, group := range app.Colocate {
-		for _, c := range group.Components {
-			if c == component {
-				return group.Components[0]
-			}
-		}
-	}
-	return component
 }

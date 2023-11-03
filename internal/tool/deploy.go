@@ -34,19 +34,17 @@ var (
 Flags:
   -h, --help	Print this help message.
 
-Container Image Names:
-  "weaver kube deploy" builds a container image locally, and optionally uploads
-  it to a container repository. The name of the image and the repository to
-  which the image is uploaded are specified using the "image" and "repo" fields
-  inside the "kube" section of the config file. For example, consider the
+  "weaver kube deploy" builds a container image locally for a given app binary,
+  and optionally uploads it to a container repository. The app specification is
+  provided in a ".toml" file using the "appConfig" field. The name of the image
+  and the repository to which the image is uploaded are specified using the
+  "image" and "repo" fields. For example, consider the
   following config file:
+      "---- config.yaml ----"
+      appConfig: "weaver.toml"
 
-      [serviceweaver]
-      binary = "./foo"
-
-      [kube]
-      image = "foo:0.0.1"
-      repo  = "docker.io/my_docker_hub_username"
+      image: "foo:0.0.1"
+      repo: "docker.io/my_docker_hub_username"
 
   Using this config file, "weaver kube deploy" will build an image named
   "foo:0.0.1" and upload it to "docker.io/my_docker_hub_username/foo:0.0.1". If
@@ -60,57 +58,99 @@ Container Image Names:
       - Google Artifact Registry:  LOCATION-docker.pkg.dev/PROJECT-ID
       - GitHub Container Registry: ghcr.io/NAMESPACE
 
-  You can set more advanced knobs in the "kube" section:
-    a) Namespace - where the application should be deployed.
-       namespace = "your_namespace"
+  You can set more advanced knobs:
+    a) Namespace [1] - where the application should be deployed.
+       namespace: "your_namespace"
 
-    b) Service account - specify the service account to use when running your
+    b) Service account [2] - specify the service account to use when running your
        application pods.
-       service_account = "your_service_account""
+       serviceAccount: "your_service_account""
 
-    b) Configure listeners
+    c) Configure listeners
       1. Whether your listener should be public, i.e., should it receive ingress
          traffic from the public internet. If false, the listener is configured
          only for cluster-internal access. To make a listener "foo" public you
          should set:
-         listeners.foo = {public = true}
+         listeners:
+           - name: foo
+             public: true
+
       2. Whether you want your listener to listen on a particular port:
-         listeners.foo = {port = 1234}
+         listeners:
+           - name: foo
+             port: 1234
+
       3. Whether the listener service should have the same name across multiple
          application versions:
-         listeners.foo = {service_name = "unique_name"}
+         listeners:
+           - name: foo
+             serviceName: "unique_name"
 
       You can specify any combination of the various options or none. E.g.,
-         listeners.foo = {public = true, serice_name = "unique_name"}
+         listeners:
+           - name: foo
+             public: true
+             serviceName: "unique_name"
 
-    c) Configure resource requirements for the pods [1]. E.g.,
-      [kube.resources]
-      requests_cpu = "200m"
-      requests_mem = "256Mi"
-      limits_cpu = "400m"
-      limits_mem = "512Mi"
+    d) Configure resource requirements for the pods [3]. E.g.,
+       resourceSpec:
+         requests:
+           memory: "64Mi"
+           cpu: "250m"
+         limits:
+           memory: "128Mi"
+           cpu: "500m"
 
-      You can also specify any combination of the various options or none.
+    e) Configure scaling specs [4] for the pods. E.g.,
+       scalingSpec:
+         minReplicas: 2
+         maxReplicas: 5
+         metrics:
+           - type: Resource
+             resource:
+               name: cpu
+               target:
+                 type: Utilization
+                 averageUtilization: 50
 
-      [1] https://kubernetes.io/docs/concepts/configuration/manage-resources-containers/
+    f) Configure container probes [5]. E.g.,
+       probeSpec:
+         livenessProbe:
+           httpGet:
+             path: /healthz
+             port: 80
+          initialDelaySeconds: 15
+          periodSeconds: 10
 
-    d) Configure probes [1]. The kube deployer allows you to configure readiness
-       and liveness probes. For each probe, you can configure:
-         - how often to perform the probe "period_secs"
-         - how long to wait for a probe to respond before declaring a timeout "timeout_secs"
-         - minimum consecutive successes for the probe to be successful "success_threshold"
-         - minimum consecutive failures for the probe to be considered failed "failure_threshold"
-         - a probe handler that describes the probe behavior. You can use a TCP,
-           HTTP or a custom commands probe handler.
+    g) Specify volumes and how to mount volumes [6] (e.g., pvc, config maps, secrets). E.g.,
+       storageSpec:
+         volumes:
+           - name: my-secret
+             volumeSource:
+                secret: 
+                  secretName: my-secret-name
+         volumeMounts:
+           - name: my-secret
+             mountPath: /etc/secret
 
-       E.g.,
-       [kube.readiness_probe]
-       period_secs = 2
-       [kube.readiness_probe.http]
-       path = "/health"
-       port = 8081
+    h) Configure groups of collocated components. E.g., if you want two components
+       "Foo" and "Bar" to run in the same OS process, you can put them in the
+       same group. E.g.,
+       groups:
+         - name: group1
+           components: 
+             - Foo
+             - Bar
 
-      [1] https://kubernetes.io/docs/tasks/configure-pod-container/configure-liveness-readiness-startup-probes/
+       For each group, you can also configure the resource, scaling and the storage
+       specs as shown in e), f) and h).
+
+    [1] https://kubernetes.io/docs/concepts/overview/working-with-objects/namespaces/
+    [2] https://kubernetes.io/docs/concepts/security/service-accounts/ 
+    [3] https://kubernetes.io/docs/concepts/configuration/manage-resources-containers/
+    [4] https://kubernetes.io/docs/tasks/run-application/horizontal-pod-autoscale/
+    [5] https://kubernetes.io/docs/tasks/configure-pod-container/configure-liveness-readiness-startup-probes/
+    [6] https://kubernetes.io/docs/concepts/storage/volumes/
 `,
 		Flags: flags,
 		Fn: func(ctx context.Context, args []string) error {

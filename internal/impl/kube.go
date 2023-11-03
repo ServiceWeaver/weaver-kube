@@ -36,7 +36,6 @@ import (
 	_ "k8s.io/api/autoscaling/v2beta2"
 	corev1 "k8s.io/api/core/v1"
 	rbacv1 "k8s.io/api/rbac/v1"
-	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/intstr"
 	"sigs.k8s.io/yaml"
@@ -51,9 +50,6 @@ const (
 
 	// Port used by the weavelets to listen for internal traffic.
 	internalPort = 10000
-
-	// Default Prometheus port.
-	prometheusPort = 9090
 )
 
 // Start value for ports used by the public and private listeners.
@@ -72,40 +68,12 @@ type deployment struct {
 	groups       []group           // groups
 }
 
-// group contains information about a possibly replicated group of components.
-type group struct {
-	name       string     // group name
-	components []string   // hosted components
-	listeners  []listener // hosted listeners
-}
-
 // listener contains information about a listener.
 type listener struct {
 	name        string // listener name
 	serviceName string // Kubernetes service name
 	port        int32  // port on which listener listens
 	public      bool   // is the listener publicly accessible
-}
-
-// shortenComponent shortens the given component name to be of the format
-// <pkg>-<IfaceType>. (Recall that the full component name is of the format
-// <path1>/<path2>/.../<pathN>/<IfaceType>.)
-func shortenComponent(component string) string {
-	parts := strings.Split(component, "/")
-	switch len(parts) {
-	case 0: // should never happen
-		panic(fmt.Errorf("invalid component name: %s", component))
-	case 1:
-		return parts[0]
-	default:
-		return fmt.Sprintf("%s-%s", parts[len(parts)-2], parts[len(parts)-1])
-	}
-}
-
-func deploymentName(app, component, deploymentId string) string {
-	hash := hash8([]string{app, component, deploymentId})
-	shortened := strings.ToLower(shortenComponent(component))
-	return fmt.Sprintf("%s-%s-%s", shortened, deploymentId[:8], hash)
 }
 
 // buildDeployment generates a Kubernetes Deployment for a group.
@@ -115,7 +83,7 @@ func deploymentName(app, component, deploymentId string) string {
 // calls foo.
 func buildDeployment(d deployment, g group) (*appsv1.Deployment, error) {
 	// Create labels.
-	name := deploymentName(d.app.Name, g.name, d.deploymentId)
+	name := deploymentName(d.app.Name, g.Name, d.deploymentId)
 	podLabels := map[string]string{
 		"serviceweaver/name":    name,
 		"serviceweaver/app":     d.app.Name,
@@ -135,7 +103,7 @@ func buildDeployment(d deployment, g group) (*appsv1.Deployment, error) {
 	}
 
 	// Create Deployment.
-	return &appsv1.Deployment{
+	dep := &appsv1.Deployment{
 		TypeMeta: metav1.TypeMeta{
 			APIVersion: "apps/v1",
 			Kind:       "Deployment",
@@ -148,7 +116,7 @@ func buildDeployment(d deployment, g group) (*appsv1.Deployment, error) {
 				"serviceweaver/version": d.deploymentId[:8],
 			},
 			Annotations: map[string]string{
-				"description": fmt.Sprintf("This Deployment hosts components %v.", strings.Join(g.components, ", ")),
+				"description": fmt.Sprintf("This Deployment hosts components %v.", strings.Join(g.Components, ", ")),
 			},
 		},
 		Spec: appsv1.DeploymentSpec{
@@ -162,7 +130,7 @@ func buildDeployment(d deployment, g group) (*appsv1.Deployment, error) {
 					Labels:    podLabels,
 					Namespace: d.config.Namespace,
 					Annotations: map[string]string{
-						"description": fmt.Sprintf("This Pod hosts components %v.", strings.Join(g.components, ", ")),
+						"description": fmt.Sprintf("This Pod hosts components %v.", strings.Join(g.Components, ", ")),
 					},
 				},
 				Spec: corev1.PodSpec{
@@ -185,7 +153,12 @@ func buildDeployment(d deployment, g group) (*appsv1.Deployment, error) {
 				},
 			},
 		},
-	}, nil
+	}
+
+	// Add volume sources if any volume specified for the application or for the group.
+	dep.Spec.Template.Spec.Volumes = append(dep.Spec.Template.Spec.Volumes, d.config.StorageSpec.Volumes...)
+	dep.Spec.Template.Spec.Volumes = append(dep.Spec.Template.Spec.Volumes, g.StorageSpec.Volumes...)
+	return dep, nil
 }
 
 // buildListenerService generates a kubernetes service for a listener.
@@ -219,7 +192,7 @@ func buildListenerService(d deployment, g group, lis listener) (*corev1.Service,
 		Spec: corev1.ServiceSpec{
 			Type: corev1.ServiceType(serviceType),
 			Selector: map[string]string{
-				"serviceweaver/name": deploymentName(d.app.Name, g.name, d.deploymentId),
+				"serviceweaver/name": deploymentName(d.app.Name, g.Name, d.deploymentId),
 			},
 			Ports: []corev1.ServicePort{
 				{
@@ -235,29 +208,18 @@ func buildListenerService(d deployment, g group, lis listener) (*corev1.Service,
 // buildAutoscaler generates a Kubernetes HorizontalPodAutoscaler for a group.
 func buildAutoscaler(d deployment, g group) (*autoscalingv2.HorizontalPodAutoscaler, error) {
 	// Per deployment name that is app version specific.
-	name := deploymentName(d.app.Name, g.name, d.deploymentId)
-	return &autoscalingv2.HorizontalPodAutoscaler{
-		TypeMeta: metav1.TypeMeta{
-			APIVersion: "autoscaling/v2",
-			Kind:       "HorizontalPodAutoscaler",
-		},
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      name,
-			Namespace: d.config.Namespace,
-			Labels: map[string]string{
-				"serviceweaver/app":     d.app.Name,
-				"serviceweaver/version": d.deploymentId[:8],
-			},
-			Annotations: map[string]string{
-				"description": fmt.Sprintf("This HorizontalPodAutoscaler scales the %q Deployment.", name),
-			},
-		},
-		Spec: autoscalingv2.HorizontalPodAutoscalerSpec{
-			ScaleTargetRef: autoscalingv2.CrossVersionObjectReference{
-				APIVersion: "apps/v1",
-				Kind:       "Deployment",
-				Name:       name,
-			},
+	name := deploymentName(d.app.Name, g.Name, d.deploymentId)
+
+	var spec autoscalingv2.HorizontalPodAutoscalerSpec
+
+	// Override the autoscaling spec if the user provides any spec. The scaling
+	// spec set for the group takes priority.
+	if g.ScalingSpec != nil { // Scaling spec specified for the group
+		spec = *g.ScalingSpec
+	} else if d.config.ScalingSpec != nil { // Scaling spec specified for the app
+		spec = *d.config.ScalingSpec
+	} else { // No scaling spec specified, compute default spec.
+		spec = autoscalingv2.HorizontalPodAutoscalerSpec{
 			MinReplicas: ptrOf(int32(1)),
 			MaxReplicas: 10,
 			Metrics: []autoscalingv2.MetricSpec{
@@ -274,7 +236,32 @@ func buildAutoscaler(d deployment, g group) (*autoscalingv2.HorizontalPodAutosca
 					},
 				},
 			},
+		}
+	}
+
+	spec.ScaleTargetRef = autoscalingv2.CrossVersionObjectReference{
+		APIVersion: "apps/v1",
+		Kind:       "Deployment",
+		Name:       name,
+	}
+
+	return &autoscalingv2.HorizontalPodAutoscaler{
+		TypeMeta: metav1.TypeMeta{
+			APIVersion: "autoscaling/v2",
+			Kind:       "HorizontalPodAutoscaler",
 		},
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      name,
+			Namespace: d.config.Namespace,
+			Labels: map[string]string{
+				"serviceweaver/app":     d.app.Name,
+				"serviceweaver/version": d.deploymentId[:8],
+			},
+			Annotations: map[string]string{
+				"description": fmt.Sprintf("This HorizontalPodAutoscaler scales the %q Deployment.", name),
+			},
+		},
+		Spec: spec,
 	}, nil
 }
 
@@ -288,23 +275,12 @@ func buildContainer(d deployment, g group) (corev1.Container, error) {
 			ContainerPort: l.port,
 		})
 	}
-	ports = append(ports, corev1.ContainerPort{
-		Name:          "prometheus",
-		ContainerPort: prometheusPort,
-	})
-
-	// Gather the set of resources.
-	resources, err := computeResourceRequirements(d.config.Resources)
-	if err != nil {
-		return corev1.Container{}, err
-	}
 
 	c := corev1.Container{
 		Name:            appContainerName,
 		Image:           d.image,
 		ImagePullPolicy: corev1.PullIfNotPresent,
-		Args:            append([]string{"babysitter", "/weaver/weaver.toml", "/weaver/config.textpb"}, g.components...),
-		Resources:       resources,
+		Args:            append([]string{"babysitter", "/weaver/weaver.toml", "/weaver/config.textpb"}, g.Components...),
 		Ports:           ports,
 		VolumeMounts: []corev1.VolumeMount{
 			{
@@ -325,46 +301,29 @@ func buildContainer(d deployment, g group) (corev1.Container, error) {
 		Stdin: true,
 	}
 
-	createProbeFn := func(opts *probeOptions) *corev1.Probe {
-		probe := &corev1.Probe{}
-		if opts.TimeoutSecs > 0 {
-			probe.TimeoutSeconds = opts.TimeoutSecs
-		}
-		if opts.PeriodSecs > 0 {
-			probe.PeriodSeconds = opts.PeriodSecs
-		}
-		if opts.SuccessThreshold > 0 {
-			probe.SuccessThreshold = opts.SuccessThreshold
-		}
-		if opts.FailureThreshold > 0 {
-			probe.FailureThreshold = opts.FailureThreshold
-		}
-		if opts.Tcp != nil {
-			probe.TCPSocket = &corev1.TCPSocketAction{Port: intstr.IntOrString{IntVal: opts.Tcp.Port}}
-		}
-		if opts.Http != nil {
-			probe.HTTPGet = &corev1.HTTPGetAction{Port: intstr.IntOrString{IntVal: opts.Http.Port}}
-			if opts.Http.Path != "" {
-				// If no path specified, the HTTPGetAction will do health checks on "/".
-				probe.HTTPGet.Path = opts.Http.Path
-			}
-		}
-		if opts.Exec != nil {
-			// Command is optional for an ExecAction. However, it's confusing why that's
-			// the case, especially that this is the only parameter to configure for an
-			// ExecAction.
-			probe.Exec = &corev1.ExecAction{Command: opts.Exec.Cmd}
-		}
-		return probe
+	// Add volume mounts if any volume specified for the application or for the group.
+	c.VolumeMounts = append(c.VolumeMounts, d.config.StorageSpec.VolumeMounts...)
+	c.VolumeMounts = append(c.VolumeMounts, g.StorageSpec.VolumeMounts...)
+
+	// Add custom resource requirements if any. The resource spec set for the group
+	// takes priority.
+	if g.ResourceSpec != nil {
+		c.Resources = *g.ResourceSpec
+	} else if d.config.ResourceSpec != nil {
+		c.Resources = *d.config.ResourceSpec
 	}
 
 	// Add probes if any.
-	if d.config.LivenessProbeOpts != nil {
-		c.LivenessProbe = createProbeFn(d.config.LivenessProbeOpts)
+	if d.config.ProbeSpec.ReadinessProbe != nil {
+		c.ReadinessProbe = d.config.ProbeSpec.ReadinessProbe
 	}
-	if d.config.ReadinessProbeOpts != nil {
-		c.LivenessProbe = createProbeFn(d.config.ReadinessProbeOpts)
+	if d.config.ProbeSpec.LivenessProbe != nil {
+		c.LivenessProbe = d.config.ProbeSpec.LivenessProbe
 	}
+	if d.config.ProbeSpec.StartupProbe != nil {
+		c.StartupProbe = d.config.ProbeSpec.StartupProbe
+	}
+
 	return c, nil
 }
 
@@ -395,7 +354,7 @@ func buildContainer(d deployment, g group) (corev1.Container, error) {
 //
 //   - If observability services are enabled (e.g., Prometheus, Jaeger), a
 //     Kubernetes Deployment and/or a Service for each observability service.
-func generateYAMLs(configFilename string, app *protos.AppConfig, cfg *kubeConfig, depId, image string) error {
+func generateYAMLs(app *protos.AppConfig, cfg *kubeConfig, depId, image string) error {
 	fmt.Fprintf(os.Stderr, greenText(), "\nGenerating kube deployment info ...")
 
 	// Form deployment.
@@ -419,7 +378,7 @@ func generateYAMLs(configFilename string, app *protos.AppConfig, cfg *kubeConfig
 	}
 
 	// Generate configuration ConfigMap.
-	if err := generateConfigMap(&b, configFilename, d); err != nil {
+	if err := generateConfigMap(&b, cfg.AppConfig, d); err != nil {
 		return fmt.Errorf("unable to generate configuration ConfigMap: %w", err)
 	}
 
@@ -503,7 +462,7 @@ func header(d deployment, filename string) (string, error) {
 	// Compute groups.
 	groups := make([][]string, len(d.groups))
 	for i, g := range d.groups {
-		groups[i] = g.components
+		groups[i] = g.Components
 	}
 
 	// Compute listeners.
@@ -602,17 +561,23 @@ func generateConfigMap(w io.Writer, configFilename string, d deployment) error {
 		return err
 	}
 
-	// Form config.textpb.
+	// Form config.textpb and mapping from component names to their group names.
 	listeners := map[string]int32{}
+	groups := map[string]string{}
 	for _, g := range d.groups {
 		for _, lis := range g.listeners {
 			listeners[lis.name] = lis.port
 		}
+		for _, c := range g.Components {
+			groups[c] = g.Name
+		}
 	}
+
 	babysitterConfig := &BabysitterConfig{
 		Namespace:    d.config.Namespace,
 		DeploymentId: d.deploymentId,
 		Listeners:    listeners,
+		Groups:       groups,
 	}
 	configTextpb, err := prototext.MarshalOptions{Multiline: true}.Marshal(babysitterConfig)
 	if err != nil {
@@ -658,7 +623,7 @@ func generateCoreYAMLs(w io.Writer, d deployment) error {
 			if err != nil {
 				return fmt.Errorf("unable to create kube listener service for %s: %w", lis.name, err)
 			}
-			if err := marshalResource(w, service, fmt.Sprintf("Listener Service for group %s", g.name)); err != nil {
+			if err := marshalResource(w, service, fmt.Sprintf("Listener Service for group %s", g.Name)); err != nil {
 				return err
 			}
 			fmt.Fprintf(os.Stderr, "Generated kube listener service for listener %v\n", lis.name)
@@ -667,22 +632,22 @@ func generateCoreYAMLs(w io.Writer, d deployment) error {
 		// Build a Deployment for the group.
 		deployment, err := buildDeployment(d, g)
 		if err != nil {
-			return fmt.Errorf("unable to create kube deployment for group %s: %w", g.name, err)
+			return fmt.Errorf("unable to create kube deployment for group %s: %w", g.Name, err)
 		}
-		if err := marshalResource(w, deployment, fmt.Sprintf("Deployment for group %s", g.name)); err != nil {
+		if err := marshalResource(w, deployment, fmt.Sprintf("Deployment for group %s", g.Name)); err != nil {
 			return err
 		}
-		fmt.Fprintf(os.Stderr, "Generated kube deployment for group %v\n", g.name)
+		fmt.Fprintf(os.Stderr, "Generated kube deployment for group %v\n", g.Name)
 
 		// Build autoscaler HorizontalPodAutoscaler for the Deployment.
 		autoscaler, err := buildAutoscaler(d, g)
 		if err != nil {
-			return fmt.Errorf("unable to create kube autoscaler for group %s: %w", g.name, err)
+			return fmt.Errorf("unable to create kube autoscaler for group %s: %w", g.Name, err)
 		}
-		if err := marshalResource(w, autoscaler, fmt.Sprintf("Autoscaler for group %s", g.name)); err != nil {
+		if err := marshalResource(w, autoscaler, fmt.Sprintf("Autoscaler for group %s", g.Name)); err != nil {
 			return err
 		}
-		fmt.Fprintf(os.Stderr, "Generated kube autoscaler for group %v\n", g.name)
+		fmt.Fprintf(os.Stderr, "Generated kube autoscaler for group %v\n", g.Name)
 	}
 	return nil
 }
@@ -696,8 +661,8 @@ func newDeployment(app *protos.AppConfig, cfg *kubeConfig, depId, image string) 
 	}
 
 	// Map every component to its group, or nil if it's in a group by itself.
-	groups := map[string]*protos.ComponentGroup{}
-	for _, group := range app.Colocate {
+	groups := map[string]group{}
+	for _, group := range cfg.Groups {
 		for _, component := range group.Components {
 			groups[component] = group
 		}
@@ -707,27 +672,36 @@ func newDeployment(app *protos.AppConfig, cfg *kubeConfig, depId, image string) 
 	groupsByName := map[string]group{}
 	for component, listeners := range components {
 		// We use the first component in a group as the name of the group.
-		name := component
-		if group, ok := groups[component]; ok {
-			name = group.Components[0]
+		var gname string
+		cgroup, ok := groups[component]
+		if ok {
+			gname = cgroup.Name
+		} else {
+			gname = component
 		}
 
 		// Append the component and listeners to the group.
-		g, ok := groupsByName[name]
+		g, ok := groupsByName[gname]
 		if !ok {
-			g = group{name: name}
+			g = group{
+				Name:         gname,
+				StorageSpec:  cgroup.StorageSpec,
+				ResourceSpec: cgroup.ResourceSpec,
+				ScalingSpec:  cgroup.ScalingSpec,
+			}
 		}
-		g.components = append(g.components, component)
+		g.Components = append(g.Components, component)
 		for _, name := range listeners {
 			g.listeners = append(g.listeners, newListener(depId, cfg, name))
 		}
-		groupsByName[name] = g
+
+		groupsByName[gname] = g
 	}
 
 	// Sort groups by name to ensure stable YAML.
 	sorted := maps.Values(groupsByName)
 	sort.Slice(sorted, func(i, j int) bool {
-		return sorted[i].name < sorted[j].name
+		return sorted[i].Name < sorted[j].Name
 	})
 
 	return deployment{
@@ -750,60 +724,22 @@ func newListener(depId string, config *kubeConfig, name string) listener {
 	}
 	externalPort++
 
-	opts, ok := config.Listeners[name]
-	if ok && opts.ServiceName != "" {
-		lis.serviceName = opts.ServiceName
-	}
-	if ok && opts.Public {
-		lis.public = opts.Public
-	}
-	if ok && opts.Port != 0 {
-		lis.port = opts.Port
+	for _, l := range config.Listeners {
+		if name != l.Name {
+			continue
+		}
+		if l.ServiceName != "" {
+			lis.serviceName = l.ServiceName
+		}
+		if l.Public {
+			lis.public = l.Public
+		}
+		if l.Port != 0 {
+			lis.port = l.Port
+		}
+		return lis
 	}
 	return lis
-}
-
-// computeResourceRequirements computes resource requirements.
-func computeResourceRequirements(req resourceRequirements) (corev1.ResourceRequirements, error) {
-	requests := corev1.ResourceList{}
-	limits := corev1.ResourceList{}
-
-	// Compute the resource requests.
-	if req.RequestsMem != "" {
-		reqsMem, err := resource.ParseQuantity(req.RequestsMem)
-		if err != nil {
-			return corev1.ResourceRequirements{}, fmt.Errorf("unable to parse requests_mem: %w", err)
-		}
-		requests[corev1.ResourceMemory] = reqsMem
-	}
-	if req.RequestsCPU != "" {
-		reqsCPU, err := resource.ParseQuantity(req.RequestsCPU)
-		if err != nil {
-			return corev1.ResourceRequirements{}, fmt.Errorf("unable to parse requests_cpu: %w", err)
-		}
-		requests[corev1.ResourceCPU] = reqsCPU
-	}
-
-	// Compute the resource limits.
-	if req.LimitsMem != "" {
-		limitsMem, err := resource.ParseQuantity(req.LimitsMem)
-		if err != nil {
-			return corev1.ResourceRequirements{}, fmt.Errorf("unable to parse limits_mem: %w", err)
-		}
-		limits[corev1.ResourceMemory] = limitsMem
-	}
-	if req.LimitsCPU != "" {
-		limitsCPU, err := resource.ParseQuantity(req.LimitsCPU)
-		if err != nil {
-			return corev1.ResourceRequirements{}, fmt.Errorf("unable to parse limits_cpu: %w", err)
-		}
-		limits[corev1.ResourceCPU] = limitsCPU
-	}
-
-	return corev1.ResourceRequirements{
-		Requests: requests,
-		Limits:   limits,
-	}, nil
 }
 
 // readComponentsAndListeners returns a map from every component to its
@@ -856,4 +792,25 @@ func marshalResource(w io.Writer, resource any, comment string) error {
 	}
 	fmt.Fprintf(w, "\n---\n")
 	return nil
+}
+
+// shortenComponent shortens the given component name to be of the format
+// <pkg>-<IfaceType>. (Recall that the full component name is of the format
+// <path1>/<path2>/.../<pathN>/<IfaceType>.)
+func shortenComponent(component string) string {
+	parts := strings.Split(component, "/")
+	switch len(parts) {
+	case 0: // should never happen
+		panic(fmt.Errorf("invalid component name: %s", component))
+	case 1:
+		return parts[0]
+	default:
+		return fmt.Sprintf("%s-%s", parts[len(parts)-2], parts[len(parts)-1])
+	}
+}
+
+func deploymentName(app, component, deploymentId string) string {
+	hash := hash8([]string{app, component, deploymentId})
+	shortened := strings.ToLower(shortenComponent(component))
+	return fmt.Sprintf("%s-%s-%s", shortened, deploymentId[:8], hash)
 }

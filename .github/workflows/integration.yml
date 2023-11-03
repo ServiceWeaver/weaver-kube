@@ -15,7 +15,8 @@
 name: Integration Test
 
 env:
-    CONFIG_FILE: deploy.toml
+    APP_CONFIG_FILE: app.toml
+    KUBE_CONFIG_FILE: deploy.yaml
     REPO_URL: 192.168.50.2:5000
     WAIT_TIMEOUT: "5m"
 
@@ -67,17 +68,27 @@ jobs:
         CONFIG=$(cat << EOF
         [serviceweaver]
         binary = "./examples/echo/echo"
-
-        [kube]
-        repo = "${{ env.REPO_URL }}"
-        listeners.echo = {public = true}
         EOF
         )
-        echo "$CONFIG" > ${{ env.CONFIG_FILE }}
+        echo "$CONFIG" > ${{ env.APP_CONFIG_FILE }}
+
+    - name: Generate kubernetes config file
+      run: |
+        CONFIG=$(cat << EOF
+        appConfig: "${{ env.APP_CONFIG_FILE }}"
+        
+        repo: "${{ env.REPO_URL }}"
+        
+        listeners:
+          - name: echo
+            public: true
+        EOF
+        )
+        echo "$CONFIG" > ${{ env.KUBE_CONFIG_FILE }}
 
     - name: Build the docker image and push
       run: |
-        WEAVER_YAML=$(./cmd/weaver-kube/weaver-kube deploy ${{ env.CONFIG_FILE }})
+        WEAVER_YAML=$(./cmd/weaver-kube/weaver-kube deploy ${{ env.KUBE_CONFIG_FILE }})
         echo "Generated YAML file:" $WEAVER_YAML
         echo "WEAVER_YAML=$WEAVER_YAML" >> $GITHUB_ENV
 

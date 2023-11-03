@@ -14,10 +14,17 @@
 
 package impl
 
-// kubeConfig contains configuration for a Service Weaver application deployed
-// with `weaver kube deploy`. The contents of a kubeConfig are parsed from the
-// [kube] section of a weaver.toml file.
+import (
+	autoscalingv2 "k8s.io/api/autoscaling/v2"
+	corev1 "k8s.io/api/core/v1"
+)
+
+// kubeConfig contains the kubernetes configuration for a Service Weaver
+// application deployed with `weaver kube deploy`.
 type kubeConfig struct {
+	// Path to the app config file.
+	AppConfig string
+
 	// Image is the name of the container image hosting the Service Weaver
 	// application.
 	//
@@ -51,35 +58,56 @@ type kubeConfig struct {
 	// account for your namespace.
 	//
 	// [1] https://kubernetes.io/docs/concepts/security/service-accounts/
-	ServiceAccount string `toml:"service_account"`
+	ServiceAccount string
 
 	// If true, application listeners will use the underlying nodes' network.
 	// This behavior is generally discouraged, but it may be useful when running
 	// the application in a minikube environment, where using the underlying
 	// nodes' network may make it easier to access the listeners directly from
 	// the host machine.
-	UseHostNetwork bool `toml:"use_host_network"`
+	UseHostNetwork bool
 
-	// Options for the application listeners, keyed by listener name.
-	// If a listener isn't specified in the map, default options will be used.
-	Listeners map[string]*listenerConfig
+	// Options for the application listeners. If a listener isn't specified in the
+	// config, default options will be used.
+	Listeners []listenerSpec
 
-	// Resources needed to run the pods. Note that the resources should satisfy
+	// Resource requirements needed to run the pods. Note that the resources should
+	// satisfy the format specified in [1].
+	//
+	// [1] https://pkg.go.dev/k8s.io/api/core/v1#ResourceRequirements.
+	ResourceSpec *corev1.ResourceRequirements
+
+	// Specs on how to scale the pods. Note that the scaling specs should satisfy
 	// the format specified in [1].
 	//
-	// [1] https://pkg.go.dev/k8s.io/apimachinery/pkg/api/resource#example-MustParse.
-	Resources resourceRequirements
+	// [1] https://pkg.go.dev/k8s.io/kubernetes/pkg/apis/autoscaling#HorizontalPodAutoscalerSpec.
+	ScalingSpec *autoscalingv2.HorizontalPodAutoscalerSpec
 
-	// Options for probes to check the readiness/liveness of the pods.
-	LivenessProbeOpts  *probeOptions `toml:"liveness_probe"`
-	ReadinessProbeOpts *probeOptions `toml:"readiness_probe"`
+	// Volumes that should be provided to all the running components.
+	StorageSpec volumeSpecs
+
+	// Options for probes to check the readiness/liveness/startup of the pods.
+	// Note that the scaling specs should satisfy the format specified in [1].
+	//
+	// [1] https://pkg.go.dev/k8s.io/api/core/v1#Probe.
+	ProbeSpec probes
+
+	// Groups contains kubernetes configuration for groups of collocated components.
+	// Note that some knobs if specified for a group will override the corresponding
+	// knob set for all the groups (e.g., ScalingSpec, ResourceSpec); for knobs like
+	// Volumes, each group will contain the sum of the volumes specified for all
+	// groups and the ones set for the group.
+	Groups []group
 }
 
-// listenerConfig stores configuration options for a listener.
-type listenerConfig struct {
+// listenerSpec stores configuration options for a listener.
+type listenerSpec struct {
+	// Listener name.
+	Name string
+
 	// If specified, the listener service will have the name set to this value.
 	// Otherwise, we will generate a unique name for each app version.
-	ServiceName string `toml:"service_name"`
+	ServiceName string
 
 	// Is the listener public, i.e., should it receive ingress traffic
 	// from the public internet. If false, the listener is configured only
@@ -92,67 +120,29 @@ type listenerConfig struct {
 	Port int32
 }
 
-// resourceRequirements stores the resource requirements configuration for running pods.
-type resourceRequirements struct {
-	// Describes the minimum amount of CPU required to run the pod.
-	RequestsCPU string `toml:"requests_cpu"`
-	// Describes the minimum amount of memory required to run the pod.
-	RequestsMem string `toml:"requests_mem"`
-	// Describes the maximum amount of CPU allowed to run the pod.
-	LimitsCPU string `toml:"limits_cpu"`
-	// Describes the maximum amount of memory allowed to run the pod.
-	LimitsMem string `toml:"limits_mem"`
+// Encapsulates probe specs as defined by the user in the kubernetes config.
+//
+// Note that we create this struct, so we can group the probe specs under a single
+// section in the yaml config file.
+type probes struct {
+	ReadinessProbe *corev1.Probe // Periodic probe of container service readiness.
+	LivenessProbe  *corev1.Probe // Periodic probe of container liveness.
+	StartupProbe   *corev1.Probe // Indicates that the pod has successfully initialized.
 }
 
-// probeOptions stores the probes [1] configuration for the pods. These options
-// mirror the Kubernetes probe options available in [2].
-//
-// [1] https://kubernetes.io/docs/tasks/configure-pod-container/configure-liveness-readiness-startup-probes/
-// [2] https://github.com/kubernetes/api/blob/v0.28.3/core/v1/types.go#L2277
-//
-// TODO(rgrandl): There are a few more knobs available in the kubernetes probe
-// definition. We can enable more knobs if really needed.
-type probeOptions struct {
-	// How often to perform the probe.
-	PeriodSecs int32 `toml:"period_secs"`
-	// Number of seconds after which the probe times out.
-	TimeoutSecs int32 `toml:"timeout_secs"`
-	// Minimum consecutive successes for the probe to be considered successful after having failed.
-	SuccessThreshold int32 `toml:"success_threshold"`
-	// Minimum consecutive failures for the probe to be considered failed after having succeeded.
-	FailureThreshold int32 `toml:"failure_threshold"`
-
-	// Probe behavior. Note that only one of the following should be set by the user.
-
-	// The probe action is taken by executing commands.
-	Exec *execAction
-	// The probe action is taken by executing HTTP GET requests.
-	Http *httpAction
-	// The probe action is taken by executing TCP requests.
-	Tcp *tcpAction
+// group contains kubernetes configuration for a group of colocated components.
+type group struct {
+	Name         string      // name of the group
+	Components   []string    // list of components in the group
+	StorageSpec  volumeSpecs // list of volumes and volume mounts
+	ResourceSpec *corev1.ResourceRequirements
+	ScalingSpec  *autoscalingv2.HorizontalPodAutoscalerSpec
+	listeners    []listener // hosted listeners, populated by the kube deployer.
 }
 
-// execAction describes the probe action when using a list of commands. It mirrors
-// Kubernetes ExecAction [1].
-//
-// [1] https://github.com/kubernetes/api/blob/v0.28.3/core/v1/types.go#L2265
-type execAction struct {
-	Cmd []string // List of commands to execute inside the container.
-}
-
-// httpAction describes the probe action when using HTTP. It mirrors Kubernetes
-// HTTPGetAction [1].
-//
-// [1] https://github.com/kubernetes/api/blob/v0.28.3/core/v1/types.go#L2208
-type httpAction struct {
-	Path string // Path to access on the HTTP server.
-	Port int32  // Port number to access on the container.
-}
-
-// tcpAction describes the probe action when using TCP. It mirrors Kubernetes
-// TCPSocketAction [1].
-//
-// [1] https://github.com/kubernetes/api/blob/v0.28.3/core/v1/types.go#L2241
-type tcpAction struct {
-	Port int32 // Port number to access on the container.
+// volumeSpecs encapsulates volumes and volume mounts specs as defined by the
+// user in the kubernetes config.
+type volumeSpecs struct {
+	Volumes      []corev1.Volume
+	VolumeMounts []corev1.VolumeMount
 }
