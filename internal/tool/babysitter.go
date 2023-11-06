@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-package main
+package tool
 
 import (
 	"context"
@@ -30,42 +30,42 @@ import (
 	"google.golang.org/protobuf/encoding/prototext"
 )
 
-var babysitterFlags = flag.NewFlagSet("babysitter", flag.ContinueOnError)
-
-var babysitterCmd = tool.Command{
-	Name:        "babysitter",
-	Flags:       babysitterFlags,
-	Description: "The weaver kubernetes babysitter",
-	Help: `Usage:
+func babysitterCmd(opts impl.BabysitterOptions) *tool.Command {
+	return &tool.Command{
+		Name:        "babysitter",
+		Flags:       flag.NewFlagSet("babysitter", flag.ContinueOnError),
+		Description: "The weaver kubernetes babysitter",
+		Help: `Usage:
   weaver kube babysitter <weaver config file> <babysitter config file> <component>...
 
 Flags:
   -h, --help   Print this help message.`,
-	Fn: func(ctx context.Context, args []string) error {
-		// Parse command line arguments.
-		if len(args) < 3 {
-			return fmt.Errorf("want >= 3 arguments, got %d", len(args))
-		}
-		app, err := parseWeaverConfig(args[0])
-		if err != nil {
-			return err
-		}
-		config, err := parseBabysitterConfig(args[1])
-		if err != nil {
-			return err
-		}
-		components := args[2:]
+		Fn: func(ctx context.Context, args []string) error {
+			// Parse command line arguments.
+			if len(args) < 3 {
+				return fmt.Errorf("want >= 3 arguments, got %d", len(args))
+			}
+			app, err := parseWeaverConfig(args[0])
+			if err != nil {
+				return err
+			}
+			config, err := parseBabysitterConfig(args[1])
+			if err != nil {
+				return err
+			}
+			components := args[2:]
 
-		// Create the babysitter.
-		b, err := impl.NewBabysitter(ctx, app, config, components)
-		if err != nil {
-			return err
-		}
+			// Create the babysitter.
+			b, err := impl.NewBabysitter(ctx, app, config, components, opts)
+			if err != nil {
+				return err
+			}
 
-		// Run the babysitter.
-		return b.Serve()
-	},
-	Hidden: true,
+			// Run the babysitter.
+			return b.Serve()
+		},
+		Hidden: true,
+	}
 }
 
 // parseWeaverConfig parses a weaver.toml config file.

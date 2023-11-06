@@ -12,14 +12,21 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-package main
+package tool
 
 import (
 	"github.com/ServiceWeaver/weaver-kube/internal/impl"
-	"github.com/ServiceWeaver/weaver-kube/internal/tool"
-	swtool "github.com/ServiceWeaver/weaver/runtime/tool"
+	"github.com/ServiceWeaver/weaver/runtime/tool"
 )
 
-func main() {
-	swtool.Run("weaver kube", tool.Commands(impl.BabysitterOptions{}))
+// Commands returns the set of `weaver kube` commands, which can be run via
+// tool.Run.
+func Commands(opts impl.BabysitterOptions) map[string]*tool.Command {
+	return map[string]*tool.Command{
+		"version": &versionCmd,
+		"deploy":  &deployCmd,
+
+		// Hidden commands.
+		"babysitter": babysitterCmd(opts),
+	}
 }
