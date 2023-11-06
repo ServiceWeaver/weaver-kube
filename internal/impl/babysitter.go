@@ -15,11 +15,8 @@
 package impl
 
 import (
-	"bytes"
 	"context"
 	"fmt"
-	"net"
-	"net/http"
 	"os"
 	"slices"
 	"sync"
@@ -29,7 +26,6 @@ import (
 	"github.com/ServiceWeaver/weaver/runtime/envelope"
 	"github.com/ServiceWeaver/weaver/runtime/logging"
 	"github.com/ServiceWeaver/weaver/runtime/metrics"
-	"github.com/ServiceWeaver/weaver/runtime/prometheus"
 	"github.com/ServiceWeaver/weaver/runtime/protos"
 	"github.com/ServiceWeaver/weaver/runtime/traces"
 	"github.com/google/uuid"
@@ -41,11 +37,6 @@ import (
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
 )
-
-// Endpoint scraped by Prometheus [1] to pull the metrics.
-//
-// [1] https://prometheus.io
-const prometheusEndpoint = "/metrics"
 
 // BabysitterOptions configure a babysitter. See tool.Plugins for details.
 type BabysitterOptions struct {
@@ -119,25 +110,7 @@ func NewBabysitter(ctx context.Context, app *protos.AppConfig, config *Babysitte
 
 func (b *babysitter) Serve() error {
 	group, ctx := errgroup.WithContext(b.ctx)
-
-	if b.opts.HandleMetrics == nil {
-		// Run an HTTP server that exports metrics.
-		lis, err := net.Listen("tcp", fmt.Sprintf(":%d", prometheusPort))
-		if err != nil {
-			return fmt.Errorf("babysitter.Serve: listen on port %d: %w", prometheusPort, err)
-		}
-		mux := http.NewServeMux()
-		mux.HandleFunc(prometheusEndpoint, func(w http.ResponseWriter, r *http.Request) {
-			// Read the metrics.
-			metrics := b.readMetrics()
-			var b bytes.Buffer
-			prometheus.TranslateMetricsToPrometheusTextFormat(&b, metrics, r.Host, prometheusEndpoint)
-			w.Write(b.Bytes()) //nolint:errcheck // response write error
-		})
-		group.Go(func() error {
-			return serveHTTP(ctx, lis, mux)
-		})
-	} else {
+	if b.opts.HandleMetrics != nil {
 		// Periodically call b.opts.HandleMetrics with the set of metrics.
 		group.Go(func() error {
 			ticker := time.NewTimer(time.Second)
@@ -305,20 +278,6 @@ func (b *babysitter) readMetrics() []*metrics.MetricSnapshot {
 		return ms
 	}
 	return append(ms, m...)
-}
-
-// serveHTTP serves HTTP traffic on the provided listener using the provided
-// handler. The server is shut down when then provided context is cancelled.
-func serveHTTP(ctx context.Context, lis net.Listener, handler http.Handler) error {
-	server := http.Server{Handler: handler}
-	errs := make(chan error, 1)
-	go func() { errs <- server.Serve(lis) }()
-	select {
-	case err := <-errs:
-		return err
-	case <-ctx.Done():
-		return server.Shutdown(ctx)
-	}
 }
 
 // replicaSetName returns the name of the replica set that hosts a given

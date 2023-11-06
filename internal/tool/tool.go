@@ -19,6 +19,8 @@ import (
 	"github.com/ServiceWeaver/weaver/runtime/tool"
 )
 
+// Commands returns the set of `weaver kube` commands, which can be run via
+// tool.Run.
 func Commands(opts impl.BabysitterOptions) map[string]*tool.Command {
 	return map[string]*tool.Command{
 		"version": &versionCmd,
