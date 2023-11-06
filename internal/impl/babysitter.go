@@ -113,7 +113,7 @@ func (b *babysitter) Serve() error {
 	if b.opts.HandleMetrics != nil {
 		// Periodically call b.opts.HandleMetrics with the set of metrics.
 		group.Go(func() error {
-			ticker := time.NewTimer(time.Second)
+			ticker := time.NewTicker(time.Second)
 			defer ticker.Stop()
 			for {
 				select {
