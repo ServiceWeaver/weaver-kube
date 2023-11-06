@@ -22,6 +22,5 @@ package impl;
 message BabysitterConfig {
   string namespace = 1;              // Kubernetes namespace
   string deployment_id = 2;          // globally unique deployment id
-  string trace_service_url = 3;      // if not empty, where to send traces
-  map<string, int32> listeners = 4;  // a map from listener name to port
+  map<string, int32> listeners = 3;  // a map from listener name to port
 }

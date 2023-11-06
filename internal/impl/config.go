@@ -64,41 +64,6 @@ type kubeConfig struct {
 	// If a listener isn't specified in the map, default options will be used.
 	Listeners map[string]*listenerConfig
 
-	// Observability controls how the deployer will export observability information
-	// such as logs, metrics and traces, keyed by service. If no options are
-	// specified, the deployer will launch corresponding services for exporting logs,
-	// metrics and traces automatically.
-	//
-	// The key must be one of the following strings:
-	// "prometheus_service" - to export metrics to Prometheus [1]
-	// "jaeger_service"     - to export traces to Jaeger [2]
-	// "loki_service"       - to export logs to Grafana Loki [3]
-	// "grafana_service"    - to visualize/manipulate observability information [4]
-	//
-	// Possible values for each service:
-	// 1) do not specify a value at all; leave it empty
-	// this is the default behavior; kube deployer will automatically create the
-	// observability service for you.
-	//
-	// 2) "none"
-	// kube deployer will not export the corresponding observability information to
-	// any service. E.g., prometheus_service = "none" means that the user will not
-	// be able to see any metrics at all. This can be useful for testing or
-	// benchmarking the performance of your application.
-	//
-	// 3) "your_observability_service_name"
-	// if you already have a running service to collect metrics, traces or logs,
-	// then you can simply specify the service name, and your application will
-	// automatically export the corresponding information to your service. E.g.,
-	// jaeger_service = "jaeger-all-in-one" will enable your running Jaeger
-	// "service/jaeger-all-in-one" to capture all the app traces.
-	//
-	// [1] - https://prometheus.io/
-	// [2] - https://www.jaegertracing.io/
-	// [3] - https://grafana.com/oss/loki/
-	// [4] - https://grafana.com/
-	Observability map[string]string
-
 	// Resources needed to run the pods. Note that the resources should satisfy
 	// the format specified in [1].
 	//
