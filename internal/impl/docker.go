@@ -29,6 +29,9 @@ import (
 	"github.com/ServiceWeaver/weaver/runtime/protos"
 )
 
+// The maximum time to wait for `docker build` to finish before aborting.
+const dockerBuildTimeout = time.Second * 120
+
 // dockerOptions configure how Docker images are built and pushed.
 type dockerOptions struct {
 	image string // see kubeConfig.Image
@@ -123,7 +126,7 @@ downloaded and installed in the container. Do you want to proceed? [Y/n] `)
 		install = "github.com/ServiceWeaver/weaver-kube/cmd/weaver-kube@" + toolVersion
 	}
 
-	// Create a Dockerfile.
+	// Create a Dockerfile in workDir/.
 	type content struct {
 		Install    string // "weaver-kube" binary to install, if any
 		Entrypoint string // container entrypoint
@@ -157,7 +160,7 @@ ENTRYPOINT ["{{.Entrypoint}}"]
 		return "", err
 	}
 
-	ctx, cancel := context.WithTimeout(ctx, time.Second*120)
+	ctx, cancel := context.WithTimeout(ctx, dockerBuildTimeout)
 	defer cancel()
 	return image, dockerBuild(ctx, workDir, image)
 }
