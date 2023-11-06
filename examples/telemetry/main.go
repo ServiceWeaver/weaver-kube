@@ -17,6 +17,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"fmt"
 	"net"
 	"net/http"
 	"sync"
@@ -26,6 +27,13 @@ import (
 	"github.com/ServiceWeaver/weaver/runtime/prometheus"
 	"go.opentelemetry.io/otel/exporters/jaeger" //lint:ignore SA1019 TODO: Update
 	"go.opentelemetry.io/otel/sdk/trace"
+)
+
+const (
+	// The Jaeger and Prometheus ports. These values should be the same as the
+	// ones in jaeger.yaml and prometheus.yaml.
+	jaegerPort     = 14268
+	prometheusPort = 9090
 )
 
 // prometheusExporter exports metrics via HTTP in Prometheus text format.
@@ -57,7 +65,7 @@ func (p *prometheusExporter) handleMetrics(_ context.Context, metrics []*metrics
 
 func main() {
 	// Export traces to Jaegar.
-	const jaegerURL = "http://jaeger:14268/api/traces"
+	jaegerURL := fmt.Sprintf("http://jaeger:%d/api/traces", jaegerPort)
 	endpoint := jaeger.WithCollectorEndpoint(jaeger.WithEndpoint(jaegerURL))
 	traceExporter, err := jaeger.New(endpoint)
 	if err != nil {
@@ -69,7 +77,7 @@ func main() {
 
 	// Export metrics to Prometheus.
 	p := &prometheusExporter{}
-	lis, err := net.Listen("tcp", ":9090")
+	lis, err := net.Listen("tcp", fmt.Sprintf(":%d", prometheusPort))
 	if err != nil {
 		panic(err)
 	}

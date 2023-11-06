@@ -8,5 +8,5 @@ Compile the `telemetry` binary and use it as you would `weaver kube`. Use
 Kubernetes cluster.
 
 ```console
-$ kubectl apply -f jaeger.yaml -f prometheus.yaml -f $(telemetry deploy weaver.toml)
+$ kubectl apply -f jaeger.yaml -f prometheus.yaml -f $(telemetry deploy kube_deploy.yaml)
 ```
