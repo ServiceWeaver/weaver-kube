@@ -39,7 +39,7 @@ type server struct {
 	lis    weaver.Listener `weaver:"echo"`
 }
 
-func serve(ctx context.Context, s *server) error {
+func serve(_ context.Context, s *server) error {
 	// Setup the HTTP handler.
 	var mux http.ServeMux
 	mux.Handle("/", weaver.InstrumentHandlerFunc("echo",

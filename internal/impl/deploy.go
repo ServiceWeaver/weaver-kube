@@ -26,22 +26,48 @@ import (
 	"github.com/ServiceWeaver/weaver/runtime/codegen"
 	"github.com/ServiceWeaver/weaver/runtime/version"
 	"github.com/google/uuid"
+	"sigs.k8s.io/yaml"
 )
 
 // Deploy generates a Kubernetes YAML file and corresponding Docker image to
-// deploy the Service Weaver application specified by the provided weaver.toml
+// deploy the Service Weaver application specified by the provided kube.yaml
 // config file.
 func Deploy(ctx context.Context, configFilename string) error {
 	// Read the config file.
 	contents, err := os.ReadFile(configFilename)
 	if err != nil {
-		return fmt.Errorf("read config file %q: %w", configFilename, err)
+		return fmt.Errorf("read deployment config file %q: %w", configFilename, err)
+	}
+
+	// Parse and validate the deployment config.
+	config := &kubeConfig{}
+	if err := yaml.Unmarshal(contents, config); err != nil {
+		return fmt.Errorf("parse deployment config file %q: %w", configFilename, err)
+	}
+
+	if config.AppConfig == "" {
+		return fmt.Errorf("app config file not specified")
+	}
+	// Ensure that the app config path is resolved relative to the deployment config path.
+	dir := filepath.Dir(configFilename)
+	if !filepath.IsAbs(config.AppConfig) {
+		appConfigPath, err := filepath.Abs(filepath.Join(dir, config.AppConfig))
+		if err != nil {
+			return err
+		}
+		config.AppConfig = appConfigPath
+	}
+
+	// Read the app config file.
+	contents, err = os.ReadFile(config.AppConfig)
+	if err != nil {
+		return fmt.Errorf("read app config file %q: %w", config.AppConfig, err)
 	}
 
 	// Parse and validate the app config.
-	app, err := runtime.ParseConfig(configFilename, string(contents), codegen.ComponentConfigValidator)
+	app, err := runtime.ParseConfig(config.AppConfig, string(contents), codegen.ComponentConfigValidator)
 	if err != nil {
-		return fmt.Errorf("parse config file %q: %w", configFilename, err)
+		return fmt.Errorf("parse app config file %q: %w", config.AppConfig, err)
 	}
 	if _, err := os.Stat(app.Binary); errors.Is(err, os.ErrNotExist) {
 		return fmt.Errorf("binary %q doesn't exist", app.Binary)
@@ -50,11 +76,6 @@ func Deploy(ctx context.Context, configFilename string) error {
 		return err
 	}
 
-	// Parse and validate the [kube] section of the app config.
-	config := &kubeConfig{}
-	if err := runtime.ParseConfigSection("kube", "github.com/ServiceWeaver/weaver/kube", app.Sections, config); err != nil {
-		return fmt.Errorf("parse [kube] section of config: %w", err)
-	}
 	if config.Repo == "" {
 		fmt.Fprintln(os.Stderr, "No container repo specified in the config file. The container image will only be accessible locally. See `weaver kube deploy --help` for details.")
 	}
@@ -63,14 +84,6 @@ func Deploy(ctx context.Context, configFilename string) error {
 	}
 	if config.ServiceAccount == "" {
 		config.ServiceAccount = "default"
-	}
-
-	// Validate the probe options.
-	if err := checkProbeOptions(config.LivenessProbeOpts); err != nil {
-		return fmt.Errorf("invalid liveness probe spec: %w", err)
-	}
-	if err := checkProbeOptions(config.ReadinessProbeOpts); err != nil {
-		return fmt.Errorf("invalid readiness probe spec: %w", err)
 	}
 
 	binListeners, err := bin.ReadListeners(app.Binary)
@@ -83,9 +96,9 @@ func Deploy(ctx context.Context, configFilename string) error {
 			allListeners[l] = struct{}{}
 		}
 	}
-	for lis := range config.Listeners {
-		if _, ok := allListeners[lis]; !ok {
-			return fmt.Errorf("listener %s specified in the config not found in the binary", lis)
+	for _, lis := range config.Listeners {
+		if _, ok := allListeners[lis.Name]; !ok {
+			return fmt.Errorf("listener %s specified in the config not found in the binary", lis.Name)
 		}
 	}
 
@@ -100,7 +113,7 @@ func Deploy(ctx context.Context, configFilename string) error {
 	}
 
 	// Generate the kube deployment information.
-	return generateYAMLs(configFilename, app, config, depId, image)
+	return generateYAMLs(app, config, depId, image)
 }
 
 // checkVersionCompatibility checks that the `weaver kube` binary is compatible
@@ -116,7 +129,7 @@ func checkVersionCompatibility(appBinary string) error {
 	}
 
 	// Try to relativize the binary, defaulting to the absolute path if there
-	// are any errors..
+	// are any errors.
 	relativize := func(bin string) string {
 		cwd, err := os.Getwd()
 		if err != nil {
@@ -145,39 +158,6 @@ func checkVersionCompatibility(appBinary string) error {
 	Then, re-build your code and re-run 'weaver-kube deploy'. If the problem
 	persists, please file an issue at https://github.com/ServiceWeaver/weaver/issues`,
 			relativize(appBinary), versions.ModuleVersion, selfVersion)
-	}
-	return nil
-}
-
-// checkProbeOptions validates the configuration options for the probes.
-func checkProbeOptions(opts *probeOptions) error {
-	if opts == nil {
-		return nil
-	}
-	// Check that exactly one of the probe handlers is set.
-	phSet := 0
-	if opts.Http != nil {
-		phSet++
-	}
-	if opts.Tcp != nil {
-		phSet++
-	}
-	if opts.Exec != nil {
-		phSet++
-	}
-	if phSet != 1 {
-		return fmt.Errorf("exactly one probe handler should be specified; %d provided", phSet)
-	}
-
-	// Validate the handlers.
-	if opts.Http != nil && (opts.Http.Port < 1 || opts.Http.Port > 65535) {
-		return fmt.Errorf("http handler: invalid port %d", opts.Http.Port)
-	}
-	if opts.Tcp != nil && (opts.Tcp.Port < 1 || opts.Tcp.Port > 65535) {
-		return fmt.Errorf("tcp handler: invalid port %d", opts.Tcp.Port)
-	}
-	if opts.Exec != nil && len(opts.Exec.Cmd) == 0 {
-		return fmt.Errorf("exec handler: no commands specified")
 	}
 	return nil
 }
