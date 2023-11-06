@@ -12,6 +12,17 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+// This file contains an example of how to use the plugin API to configure how
+// metrics and traces are exported. We register a plugin to export traces to
+// Jaeger and a plugin to export metrics to Prometheus. Compile the telemetry
+// binary and use it as you would "weaver kube". Use "prometheus.yaml" and
+// "jaeger.yaml" to deploy Prometheus and Jaeger to a Kubernetes cluster.
+//
+//     $ kubectl apply \
+//         -f jaeger.yaml \
+//         -f prometheus.yaml \
+//         -f $(telemetry deploy kube_deploy.yaml)
+
 package main
 
 import (
