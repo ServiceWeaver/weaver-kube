@@ -61,6 +61,12 @@ data:
     - job_name: "serviceweaver"
       kubernetes_sd_configs:
       - role: pod
+      relabel_configs:
+      - source_labels: [__address__]
+        action: replace
+        regex: ([^:]+):.*
+        replacement: $1:9090
+        target_label: __address__
 
 ---
 
