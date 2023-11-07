@@ -62,6 +62,7 @@ data:
       kubernetes_sd_configs:
       - role: pod
       relabel_configs:
+      # https://stackoverflow.com/a/67100381/3187068
       - source_labels: [__address__]
         action: replace
         regex: ([^:]+):.*
