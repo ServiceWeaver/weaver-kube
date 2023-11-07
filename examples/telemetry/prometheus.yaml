@@ -12,65 +12,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# Give Prometheus permissions to list pods.
-apiVersion: rbac.authorization.k8s.io/v1
-kind: ClusterRole
-metadata:
-  creationTimestamp: null
-  name: pods-getter
-  namespace: default
-rules:
-- apiGroups:
-  - ""
-  resources:
-  - pods
-  verbs:
-  - get
-  - list
-  - watch
-
----
-
-apiVersion: rbac.authorization.k8s.io/v1
-kind: ClusterRoleBinding
-metadata:
-  creationTimestamp: null
-  name: default-pods-getter
-  namespace: default
-roleRef:
-  apiGroup: rbac.authorization.k8s.io
-  kind: ClusterRole
-  name: pods-getter
-subjects:
-- kind: ServiceAccount
-  name: default
-  namespace: default
-
----
-
-# Store prometheus.yaml in a ConfigMap.
-apiVersion: v1
-kind: ConfigMap
-metadata:
-  name: prometheus-config
-data:
-  prometheus.yaml: |
-    global:
-      scrape_interval: 15s
-    scrape_configs:
-    - job_name: "serviceweaver"
-      kubernetes_sd_configs:
-      - role: pod
-      relabel_configs:
-      # https://stackoverflow.com/a/67100381/3187068
-      - source_labels: [__address__]
-        action: replace
-        regex: ([^:]+):.*
-        replacement: $1:9090
-        target_label: __address__
-
----
-
 # Prometheus Service.
 apiVersion: v1
 kind: Service
@@ -117,3 +58,62 @@ spec:
       - name: prometheus-config
         configMap:
           name: prometheus-config
+
+---
+
+# Store prometheus.yaml in a ConfigMap.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: prometheus-config
+data:
+  prometheus.yaml: |
+    global:
+      scrape_interval: 15s
+    scrape_configs:
+    - job_name: "serviceweaver"
+      kubernetes_sd_configs:
+      - role: pod
+      relabel_configs:
+      # https://stackoverflow.com/a/67100381/3187068
+      - source_labels: [__address__]
+        action: replace
+        regex: ([^:]+):.*
+        replacement: $1:9090
+        target_label: __address__
+
+---
+
+# Give Prometheus permissions to list pods.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  creationTimestamp: null
+  name: pods-getter
+  namespace: default
+rules:
+- apiGroups:
+  - ""
+  resources:
+  - pods
+  verbs:
+  - get
+  - list
+  - watch
+
+---
+
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  creationTimestamp: null
+  name: default-pods-getter
+  namespace: default
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: pods-getter
+subjects:
+- kind: ServiceAccount
+  name: default
+  namespace: default

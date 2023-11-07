@@ -12,26 +12,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# Jaegar Deployment
-apiVersion: apps/v1
-kind: Deployment
-metadata:
-  name: jaeger
-spec:
-  selector:
-    matchLabels:
-      app: jaeger
-  template:
-    metadata:
-      labels:
-        app: jaeger
-    spec:
-      containers:
-      - name: jaeger
-        image: jaegertracing/all-in-one:latest
-
----
-
 # Jaegar Service
 apiVersion: v1
 kind: Service
@@ -49,3 +29,23 @@ spec:
     protocol: TCP
   selector:
     app: jaeger
+
+---
+
+# Jaegar Deployment
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: jaeger
+spec:
+  selector:
+    matchLabels:
+      app: jaeger
+  template:
+    metadata:
+      labels:
+        app: jaeger
+    spec:
+      containers:
+      - name: jaeger
+        image: jaegertracing/all-in-one:latest
