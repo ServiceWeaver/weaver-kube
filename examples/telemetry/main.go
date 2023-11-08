@@ -98,7 +98,7 @@ func main() {
 		}
 	}()
 
-	tool.Run("deploy", tool.Plugins{
+	tool.Run("telemetry", tool.Plugins{
 		HandleTraceSpans: handleTraceSpans,
 		HandleMetrics:    p.handleMetrics,
 	})

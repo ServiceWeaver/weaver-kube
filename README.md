@@ -1,7 +1,7 @@
 # weaver-kube
 
 This repository contains Go libraries for deploying Service Weaver applications
-in any [Kubernetes][kubernetes] environment using the `KUBE` deployer.
+in any [Kubernetes][kubernetes] environment using the `Kube` deployer.
 
 Visit [https://serviceweaver.dev][website] to learn about Service Weaver.
 
@@ -24,7 +24,7 @@ Features:
 
 ## Installation and Getting Started
 
-Visit the `KUBE` section of [https://serviceweaver.dev/docs.html][kube_docs]
+Visit the `Kube` section of [https://serviceweaver.dev/docs.html][kube_docs]
 for installation instructions and information on getting started.
 
 ## Contributing
