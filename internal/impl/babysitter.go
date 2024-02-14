@@ -16,7 +16,9 @@ package impl
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"log/slog"
 	"os"
 	"slices"
 	"sync"
@@ -53,23 +55,31 @@ type babysitter struct {
 	app       *protos.AppConfig
 	envelope  *envelope.Envelope
 	clientset *kubernetes.Clientset
+	logger    *slog.Logger
 	printer   *logging.PrettyPrinter
 
 	mu       sync.Mutex
 	watching map[string]struct{} // components being watched
 }
 
+var _ envelope.EnvelopeHandler = &babysitter{}
+
 func NewBabysitter(ctx context.Context, app *protos.AppConfig, config *BabysitterConfig, components []string, opts BabysitterOptions) (*babysitter, error) {
 	// Create the envelope.
-	wlet := &protos.EnvelopeInfo{
+	wlet := &protos.WeaveletArgs{
 		App:             app.Name,
 		DeploymentId:    config.DeploymentId,
 		Id:              uuid.New().String(),
-		Sections:        app.Sections,
 		RunMain:         slices.Contains(components, runtime.Main),
 		InternalAddress: fmt.Sprintf(":%d", internalPort),
 	}
-	e, err := envelope.NewEnvelope(ctx, wlet, app)
+	logger := logging.StderrLogger(logging.Options{
+		App:       app.Name,
+		Component: "babysitter",
+		Weavelet:  wlet.Id,
+		Attrs:     []string{"serviceweaver/system", ""},
+	})
+	e, err := envelope.NewEnvelope(ctx, wlet, app, envelope.Options{Logger: logger})
 	if err != nil {
 		return nil, fmt.Errorf("NewBabysitter: create envelope: %w", err)
 	}
@@ -92,6 +102,7 @@ func NewBabysitter(ctx context.Context, app *protos.AppConfig, config *Babysitte
 		app:       app,
 		envelope:  e,
 		clientset: clientset,
+		logger:    logger,
 		watching:  map[string]struct{}{},
 	}
 
@@ -235,8 +246,18 @@ func (b *babysitter) ExportListener(context.Context, *protos.ExportListenerReque
 	return &protos.ExportListenerReply{ProxyAddress: ""}, nil
 }
 
-// HandleLogEntry implements the envelope.EnvelopeHandler interface.
-func (b *babysitter) HandleLogEntry(ctx context.Context, entry *protos.LogEntry) error {
+// LogBatch implements the envelope.EnvelopeHandler interface.
+func (b *babysitter) LogBatch(ctx context.Context, batch *protos.LogEntryBatch) error {
+	var errs []error
+	for _, entry := range batch.Entries {
+		if err := b.handleLogEntry(ctx, entry); err != nil {
+			errs = append(errs, err)
+		}
+	}
+	return errors.Join(errs...)
+}
+
+func (b *babysitter) handleLogEntry(ctx context.Context, entry *protos.LogEntry) error {
 	if b.opts.HandleLogEntry != nil {
 		return b.opts.HandleLogEntry(ctx, entry)
 	}
