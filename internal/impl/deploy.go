@@ -119,7 +119,19 @@ func Deploy(ctx context.Context, configFilename string) error {
 // checkVersionCompatibility checks that the `weaver kube` binary is compatible
 // with the application binary being deployed.
 func checkVersionCompatibility(appBinary string) error {
-	versions, err := bin.ReadVersions(appBinary)
+	// Read the versions of the application binary.
+	appBinaryVersions, err := bin.ReadVersions(appBinary)
+	if err != nil {
+		return fmt.Errorf("read versions: %w", err)
+	}
+
+	// Read the versions of the 'weaver kube' binary (i.e. the currently
+	// running binary).
+	tool, err := os.Executable()
+	if err != nil {
+		return err
+	}
+	weaverKubeVersions, err := bin.ReadVersions(tool)
 	if err != nil {
 		return fmt.Errorf("read versions: %w", err)
 	}
@@ -142,22 +154,22 @@ func checkVersionCompatibility(appBinary string) error {
 		return rel
 	}
 
-	if versions.DeployerVersion != version.DeployerVersion {
+	if appBinaryVersions.DeployerVersion != version.DeployerVersion {
 		return fmt.Errorf(`
-	ERROR: The binary you're trying to deploy (%q) was built with
-	github.com/ServiceWeaver/weaver module version %s. However, the 'weaver-kube'
-	binary you're using was built with weaver module version %s. These versions are
-	incompatible.
+ERROR: The binary you're trying to deploy (%q) was built with
+github.com/ServiceWeaver/weaver module version %s (internal version %s).
+However, the 'weaver-kube' binary you're using (%s) was built with weaver
+module version %s (internal version %s). These versions are incompatible.
 
-	We recommend updating both the weaver module your application is built with and
-	updating the 'weaver-kube' command by running the following.
+We recommend updating both the weaver module your application is built with and
+updating the 'weaver-kube' command by running the following.
 
-		go get github.com/ServiceWeaver/weaver@latest
-		go install github.com/ServiceWeaver/weaver-kube/cmd/weaver-kube@latest
+	go get github.com/ServiceWeaver/weaver@latest
+	go install github.com/ServiceWeaver/weaver-kube/cmd/weaver-kube@latest
 
-	Then, re-build your code and re-run 'weaver-kube deploy'. If the problem
-	persists, please file an issue at https://github.com/ServiceWeaver/weaver/issues`,
-			relativize(appBinary), versions.ModuleVersion, selfVersion)
+Then, re-build your code and re-run 'weaver-kube deploy'. If the problem
+persists, please file an issue at https://github.com/ServiceWeaver/weaver/issues`,
+			relativize(appBinary), appBinaryVersions.ModuleVersion, appBinaryVersions.DeployerVersion, selfVersion, weaverKubeVersions.ModuleVersion, version.DeployerVersion)
 	}
 	return nil
 }
