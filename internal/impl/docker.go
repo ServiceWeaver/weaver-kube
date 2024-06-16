@@ -30,12 +30,16 @@ import (
 )
 
 // The maximum time to wait for `docker build` to finish before aborting.
-const dockerBuildTimeout = time.Second * 120
+const (
+	dockerBuildTimeout = time.Second * 120
+	defaultBaseImage   = "ubuntu:rolling"
+)
 
 // dockerOptions configure how Docker images are built and pushed.
 type dockerOptions struct {
-	image string // see kubeConfig.Image
-	repo  string // see kubeConfig.Repo
+	image     string // see kubeConfig.Image
+	repo      string // see kubeConfig.Repo
+	baseImage string // see kubeConfig.BaseImage
 }
 
 // buildAndUploadDockerImage builds a Docker image and uploads it to a remote
@@ -130,6 +134,7 @@ downloaded and installed in the container. Do you want to proceed? [Y/n] `)
 	type content struct {
 		Install    string // "weaver-kube" binary to install, if any
 		Entrypoint string // container entrypoint
+		BaseImage  string // Name of the base image used to build the container.
 	}
 	var template = template.Must(template.New("Dockerfile").Parse(`
 {{if .Install }}
@@ -137,7 +142,7 @@ FROM golang:bullseye as builder
 RUN go install "{{.Install}}"
 {{end}}
 
-FROM ubuntu:rolling
+FROM {{.BaseImage}}
 WORKDIR /weaver/
 COPY . .
 {{if .Install }}
@@ -155,6 +160,10 @@ ENTRYPOINT ["{{.Entrypoint}}"]
 		c.Entrypoint = "/weaver/weaver-kube"
 	} else {
 		c.Entrypoint = filepath.Join("/weaver", filepath.Base(tool))
+	}
+	c.BaseImage = opts.baseImage
+	if c.BaseImage == "" {
+		c.BaseImage = defaultBaseImage
 	}
 	if err := template.Execute(dockerFile, c); err != nil {
 		return "", err

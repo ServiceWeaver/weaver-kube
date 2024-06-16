@@ -25,6 +25,11 @@ type kubeConfig struct {
 	// Path to the app config file.
 	AppConfig string
 
+	// BaseImage is the base docker image used to build the container.
+	//
+	// If empty, Service Weaver will pick 'ubuntu:rolling' as the base image.
+	BaseImage string
+
 	// Image is the name of the container image hosting the Service Weaver
 	// application.
 	//

@@ -106,7 +106,7 @@ func Deploy(ctx context.Context, configFilename string) error {
 	depId := uuid.New().String()
 
 	// Build the docker image for the deployment.
-	opts := dockerOptions{image: config.Image, repo: config.Repo}
+	opts := dockerOptions{image: config.Image, repo: config.Repo, baseImage: config.BaseImage}
 	image, err := buildAndUploadDockerImage(ctx, app, depId, opts)
 	if err != nil {
 		return err
