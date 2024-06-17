@@ -138,6 +138,7 @@ func buildDeployment(d deployment, g group) (*appsv1.Deployment, error) {
 					Containers:         []corev1.Container{container},
 					DNSPolicy:          dnsPolicy,
 					HostNetwork:        d.config.UseHostNetwork,
+					Affinity:           d.config.AffinitySpec,
 					Volumes: []corev1.Volume{
 						{
 							Name: "config",

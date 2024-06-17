@@ -92,6 +92,12 @@ type kubeConfig struct {
 	// [1] https://pkg.go.dev/k8s.io/api/core/v1#Probe.
 	ProbeSpec probes
 
+	// Specs for pod and node affinnity. Note that the affinity specs should satisfy
+	// the format specified in [1].
+	//
+	// [1] https://pkg.go.dev/k8s.io/api/core/v1#Affinity
+	AffinitySpec *corev1.Affinity
+
 	// Groups contains kubernetes configuration for groups of collocated components.
 	// Note that some knobs if specified for a group will override the corresponding
 	// knob set for all the groups (e.g., ScalingSpec, ResourceSpec); for knobs like
