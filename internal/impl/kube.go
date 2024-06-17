@@ -96,6 +96,10 @@ func buildDeployment(d deployment, g group) (*appsv1.Deployment, error) {
 		dnsPolicy = corev1.DNSClusterFirstWithHostNet
 	}
 
+	matchLabels := map[string]string{
+		"serviceweaver/name": name,
+	}
+
 	// Create container.
 	container, err := buildContainer(d, g)
 	if err != nil {
@@ -121,9 +125,7 @@ func buildDeployment(d deployment, g group) (*appsv1.Deployment, error) {
 		},
 		Spec: appsv1.DeploymentSpec{
 			Selector: &metav1.LabelSelector{
-				MatchLabels: map[string]string{
-					"serviceweaver/name": name,
-				},
+				MatchLabels: matchLabels,
 			},
 			Template: corev1.PodTemplateSpec{
 				ObjectMeta: metav1.ObjectMeta{
@@ -138,6 +140,7 @@ func buildDeployment(d deployment, g group) (*appsv1.Deployment, error) {
 					Containers:         []corev1.Container{container},
 					DNSPolicy:          dnsPolicy,
 					HostNetwork:        d.config.UseHostNetwork,
+					Affinity:           updateAffinitySpec(d.config.AffinitySpec, matchLabels),
 					Volumes: []corev1.Volume{
 						{
 							Name: "config",
@@ -711,7 +714,45 @@ func newDeployment(app *protos.AppConfig, cfg *kubeConfig, depId, image string) 
 		app:          app,
 		groups:       sorted,
 	}, nil
+}
 
+// updateAffinitySpec updates an affinity spec with a rule that instructs the
+// kubernetes scheduler to try its best to assign different replicas for the same
+// deployment to different nodes.
+//
+// Note that this rule isn't necessarily enforced, and the scheduler can ignore
+// it if there is no way this can be done (e.g., number of replicas is greater or
+// equal to the number of nodes).
+func updateAffinitySpec(spec *corev1.Affinity, labels map[string]string) *corev1.Affinity {
+	updated := &corev1.Affinity{PodAntiAffinity: &corev1.PodAntiAffinity{
+		PreferredDuringSchedulingIgnoredDuringExecution: []corev1.WeightedPodAffinityTerm{
+			{
+				Weight: 100,
+				PodAffinityTerm: corev1.PodAffinityTerm{
+					LabelSelector: &metav1.LabelSelector{
+						MatchLabels: labels,
+					},
+					TopologyKey: corev1.LabelHostname,
+				},
+			},
+		},
+	},
+	}
+	if spec == nil {
+		return updated
+	}
+	if spec.NodeAffinity != nil {
+		updated.NodeAffinity = spec.NodeAffinity
+	}
+	if spec.PodAffinity != nil {
+		updated.PodAffinity = spec.PodAffinity
+	}
+	if spec.PodAntiAffinity != nil {
+		updated.PodAntiAffinity.RequiredDuringSchedulingIgnoredDuringExecution = spec.PodAntiAffinity.RequiredDuringSchedulingIgnoredDuringExecution
+		updated.PodAntiAffinity.PreferredDuringSchedulingIgnoredDuringExecution = append(
+			updated.PodAntiAffinity.PreferredDuringSchedulingIgnoredDuringExecution, spec.PodAntiAffinity.PreferredDuringSchedulingIgnoredDuringExecution...)
+	}
+	return updated
 }
 
 // newListener returns a new listener.

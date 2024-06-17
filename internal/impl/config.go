@@ -83,6 +83,12 @@ type kubeConfig struct {
 	// [1] https://pkg.go.dev/k8s.io/kubernetes/pkg/apis/autoscaling#HorizontalPodAutoscalerSpec.
 	ScalingSpec *autoscalingv2.HorizontalPodAutoscalerSpec
 
+	// Specs for pod affinity. Note that the affinity specs should satisfy
+	// the format specified in [1].
+	//
+	// [1] https://pkg.go.dev/k8s.io/api/core/v1#Affinity
+	AffinitySpec *corev1.Affinity
+
 	// Volumes that should be provided to all the running components.
 	StorageSpec volumeSpecs
 
