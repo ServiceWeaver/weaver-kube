@@ -2,8 +2,6 @@ module github.com/ServiceWeaver/weaver-kube
 
 go 1.22.0
 
-toolchain go1.22.1
-
 require (
 	github.com/ServiceWeaver/weaver v0.24.2
 	github.com/google/uuid v1.6.0
