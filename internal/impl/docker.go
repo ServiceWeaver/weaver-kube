@@ -133,7 +133,7 @@ downloaded and installed in the container. Do you want to proceed? [Y/n] `)
 	type content struct {
 		Install    string // "weaver-kube" binary to install, if any
 		Entrypoint string // container entrypoint
-		BaseImage  string // Name of the base image used to build the container.
+		BaseImage  string // Name of the base image used to build the container
 	}
 	var template = template.Must(template.New("Dockerfile").Parse(`
 {{if .Install }}
