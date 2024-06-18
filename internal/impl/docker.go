@@ -32,7 +32,6 @@ import (
 // The maximum time to wait for `docker build` to finish before aborting.
 const (
 	dockerBuildTimeout = time.Second * 120
-	defaultBaseImage   = "ubuntu:rolling"
 )
 
 // dockerOptions configure how Docker images are built and pushed.
@@ -162,9 +161,6 @@ ENTRYPOINT ["{{.Entrypoint}}"]
 		c.Entrypoint = filepath.Join("/weaver", filepath.Base(tool))
 	}
 	c.BaseImage = opts.baseImage
-	if c.BaseImage == "" {
-		c.BaseImage = defaultBaseImage
-	}
 	if err := template.Execute(dockerFile, c); err != nil {
 		return "", err
 	}

@@ -29,6 +29,12 @@ import (
 	"sigs.k8s.io/yaml"
 )
 
+const (
+	defaultNamespace      = "default"
+	defaultServiceAccount = "default"
+	defaultBaseImage      = "ubuntu:rolling"
+)
+
 // Deploy generates a Kubernetes YAML file and corresponding Docker image to
 // deploy the Service Weaver application specified by the provided kube.yaml
 // config file.
@@ -80,10 +86,13 @@ func Deploy(ctx context.Context, configFilename string) error {
 		fmt.Fprintln(os.Stderr, "No container repo specified in the config file. The container image will only be accessible locally. See `weaver kube deploy --help` for details.")
 	}
 	if config.Namespace == "" {
-		config.Namespace = "default"
+		config.Namespace = defaultNamespace
 	}
 	if config.ServiceAccount == "" {
-		config.ServiceAccount = "default"
+		config.ServiceAccount = defaultServiceAccount
+	}
+	if config.BaseImage == "" {
+		config.BaseImage = defaultBaseImage
 	}
 
 	binListeners, err := bin.ReadListeners(app.Binary)
