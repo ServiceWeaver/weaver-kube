@@ -30,9 +30,10 @@ import (
 )
 
 const (
-	defaultNamespace      = "default"
-	defaultServiceAccount = "default"
-	defaultBaseImage      = "ubuntu:rolling"
+	defaultNamespace                = "default"
+	defaultServiceAccount           = "default"
+	defaultBaseImage                = "ubuntu:rolling"
+	defaultMinExportMetricsInterval = "30s"
 )
 
 // Deploy generates a Kubernetes YAML file and corresponding Docker image to
@@ -93,6 +94,9 @@ func Deploy(ctx context.Context, configFilename string) error {
 	}
 	if config.BaseImage == "" {
 		config.BaseImage = defaultBaseImage
+	}
+	if config.Telemetry.Metrics.ExportInterval == "" {
+		config.Telemetry.Metrics.ExportInterval = defaultMinExportMetricsInterval
 	}
 
 	binListeners, err := bin.ReadListeners(app.Binary)

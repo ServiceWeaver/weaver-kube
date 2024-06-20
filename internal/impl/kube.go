@@ -25,12 +25,14 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/ServiceWeaver/weaver/runtime/bin"
 	"github.com/ServiceWeaver/weaver/runtime/protos"
 	"github.com/google/uuid"
 	"golang.org/x/exp/maps"
 	"google.golang.org/protobuf/encoding/prototext"
+	"google.golang.org/protobuf/types/known/durationpb"
 	appsv1 "k8s.io/api/apps/v1"
 	autoscalingv2 "k8s.io/api/autoscaling/v2"
 	_ "k8s.io/api/autoscaling/v2beta2"
@@ -576,11 +578,22 @@ func generateConfigMap(w io.Writer, configFilename string, d deployment) error {
 		}
 	}
 
+	exportInterval, err := time.ParseDuration(d.config.Telemetry.Metrics.ExportInterval)
+	if err != nil {
+		return fmt.Errorf("unable to parse metrics export interval: %v", err)
+	}
+
 	babysitterConfig := &BabysitterConfig{
 		Namespace:    d.config.Namespace,
 		DeploymentId: d.deploymentId,
 		Listeners:    listeners,
 		Groups:       groups,
+		Telemetry: &Telemetry{
+			Metrics: &MetricOptions{
+				AutoGenerateMetrics: d.config.Telemetry.Metrics.Generated,
+				ExportInterval:      durationpb.New(exportInterval),
+			},
+		},
 	}
 	configTextpb, err := prototext.MarshalOptions{Multiline: true}.Marshal(babysitterConfig)
 	if err != nil {
