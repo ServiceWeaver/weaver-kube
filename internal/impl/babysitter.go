@@ -34,10 +34,13 @@ import (
 	"go.opentelemetry.io/otel/sdk/trace"
 	"golang.org/x/sync/errgroup"
 	v1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/watch"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
+	"k8s.io/client-go/tools/cache"
+	toolsWatch "k8s.io/client-go/tools/watch"
 )
 
 // BabysitterOptions configure a babysitter. See tool.Plugins for details.
@@ -153,6 +156,7 @@ func (b *babysitter) ActivateComponent(_ context.Context, request *protos.Activa
 		if err := b.watchPods(b.ctx, request.Component); err != nil {
 			// TODO(mwhittaker): Log this error.
 			fmt.Fprintf(os.Stderr, "watchPods(%q): %v", request.Component, err)
+			b.logger.Error("error watching pods", "err", err, "component", request.Component)
 		}
 	}()
 	return &protos.ActivateComponentReply{}, nil
@@ -161,8 +165,11 @@ func (b *babysitter) ActivateComponent(_ context.Context, request *protos.Activa
 // watchPods watches the pods hosting the provided component, updating the
 // routing info whenever the set of pods changes.
 func (b *babysitter) watchPods(ctx context.Context, component string) error {
+	logger := b.logger.With("component", component)
+	logger.Debug("watching pods")
 	b.mu.Lock()
 	if _, ok := b.watching[component]; ok {
+		logger.Debug("the pods for this component are already being watched")
 		// The pods for this component are already being watched.
 		b.mu.Unlock()
 		return nil
@@ -176,8 +183,18 @@ func (b *babysitter) watchPods(ctx context.Context, component string) error {
 		return fmt.Errorf("unable to determine group name for component %s", component)
 	}
 	name := deploymentName(b.app.Name, rs, b.cfg.DeploymentId)
+	//timeOut := int64(60)
+	// , TimeoutSeconds: &timeOut
 	opts := metav1.ListOptions{LabelSelector: fmt.Sprintf("serviceweaver/name=%s", name)}
-	watcher, err := b.clientset.CoreV1().Pods(b.cfg.Namespace).Watch(ctx, opts)
+
+	// watcher factory
+	watchFunc := func(options metav1.ListOptions) (watch.Interface, error) {
+		w, e := b.clientset.CoreV1().Pods(b.cfg.Namespace).Watch(ctx, opts)
+		logger.Debug("creating a new watcher", "err", e)
+		return w, e
+	}
+	// RetryWatcher, it should handle recoverable errors when watching
+	watcher, err := toolsWatch.NewRetryWatcher("1", &cache.ListWatch{WatchFunc: watchFunc})
 	if err != nil {
 		return fmt.Errorf("watch pods for component %s: %w", component, err)
 	}
@@ -211,6 +228,10 @@ func (b *babysitter) watchPods(ctx context.Context, component string) error {
 					delete(addrs, pod.Name)
 					changed = true
 				}
+			case watch.Error:
+				errObject := apierrors.FromObject(event.Object)
+				logger.Error("watcher error", "err", errObject)
+				// do nothing else? do we need? even with retryWatcher?
 			}
 			if !changed {
 				continue
@@ -227,6 +248,7 @@ func (b *babysitter) watchPods(ctx context.Context, component string) error {
 			if err := b.envelope.UpdateRoutingInfo(routingInfo); err != nil {
 				// TODO(mwhittaker): Log this error.
 				fmt.Fprintf(os.Stderr, "UpdateRoutingInfo(%v): %v", routingInfo, err)
+				logger.Error("error updating routing info on envelope", "err", err)
 			}
 		}
 	}
