@@ -154,15 +154,18 @@ func (b *babysitter) Serve() error {
 func (b *babysitter) ActivateComponent(ctx context.Context, request *protos.ActivateComponentRequest) (*protos.ActivateComponentReply, error) {
 	go func() {
 		for {
+			if err := b.watchPods(b.ctx, request.Component); err != nil {
+				// TODO(mwhittaker): Log this error.
+				fmt.Fprintf(os.Stderr, "watchPods(%q): %v", request.Component, err)
+				b.logger.Error("error watching pods", "err", err, "component", request.Component)
+			} else {
+				return
+			}
+
 			select {
 			case <-ctx.Done():
 				return
-			case <-time.After(5 * time.Second):
-				if err := b.watchPods(b.ctx, request.Component); err != nil {
-					// TODO(mwhittaker): Log this error.
-					fmt.Fprintf(os.Stderr, "watchPods(%q): %v", request.Component, err)
-					b.logger.Error("error watching pods", "err", err, "component", request.Component)
-				}
+			case <-time.After(5 * time.Second): // wait 5 second before retrying
 			}
 		}
 	}()
