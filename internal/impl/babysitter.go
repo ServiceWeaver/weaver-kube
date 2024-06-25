@@ -34,10 +34,13 @@ import (
 	"go.opentelemetry.io/otel/sdk/trace"
 	"golang.org/x/sync/errgroup"
 	v1 "k8s.io/api/core/v1"
+	errors2 "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/watch"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
+	"k8s.io/client-go/tools/cache"
+	watch2 "k8s.io/client-go/tools/watch"
 )
 
 // BabysitterOptions configure a babysitter. See tool.Plugins for details.
@@ -153,6 +156,7 @@ func (b *babysitter) ActivateComponent(_ context.Context, request *protos.Activa
 		if err := b.watchPods(b.ctx, request.Component); err != nil {
 			// TODO(mwhittaker): Log this error.
 			fmt.Fprintf(os.Stderr, "watchPods(%q): %v", request.Component, err)
+			b.logger.Error("error watching pods", "err", err, "component", request.Component)
 		}
 	}()
 	return &protos.ActivateComponentReply{}, nil
@@ -176,57 +180,72 @@ func (b *babysitter) watchPods(ctx context.Context, component string) error {
 		return fmt.Errorf("unable to determine group name for component %s", component)
 	}
 	name := deploymentName(b.app.Name, rs, b.cfg.DeploymentId)
-	opts := metav1.ListOptions{LabelSelector: fmt.Sprintf("serviceweaver/name=%s", name)}
-	watcher, err := b.clientset.CoreV1().Pods(b.cfg.Namespace).Watch(ctx, opts)
-	if err != nil {
-		return fmt.Errorf("watch pods for component %s: %w", component, err)
-	}
 
 	// Repeatedly receive events from Kubernetes, updating the set of pod
 	// addresses appropriately. Abort when the channel is closed or the context
 	// is canceled.
 	addrs := map[string]string{}
 	for {
-		select {
-		case <-ctx.Done():
-			watcher.Stop()
-			return ctx.Err()
+		// Create retry watcher to watch the pods.
+		watcher, err := watch2.NewRetryWatcher("1", &cache.ListWatch{
+			WatchFunc: func(metav1.ListOptions) (watch.Interface, error) {
+				opts := metav1.ListOptions{LabelSelector: fmt.Sprintf("serviceweaver/name=%s", name)}
+				w, e := b.clientset.CoreV1().Pods(b.cfg.Namespace).Watch(ctx, opts)
+				return w, e
+			},
+		})
+		if err != nil {
+			return fmt.Errorf("watch pods for component %s: %w", component, err)
+		}
 
-		case event, ok := <-watcher.ResultChan():
-			if !ok {
-				return nil
-			}
+		for {
+			select {
+			case <-ctx.Done():
+				watcher.Stop()
+				return ctx.Err() // context cancelled, we should return
 
-			changed := false
-			switch event.Type {
-			case watch.Added, watch.Modified:
-				pod := event.Object.(*v1.Pod)
-				if pod.Status.PodIP != "" && addrs[pod.Name] != pod.Status.PodIP {
-					addrs[pod.Name] = pod.Status.PodIP
-					changed = true
+			case event, ok := <-watcher.ResultChan(): // watcher channel closed, restart the watcher
+				if !ok {
+					watcher.Stop()
+					break
 				}
-			case watch.Deleted:
-				pod := event.Object.(*v1.Pod)
-				if _, ok := addrs[pod.Name]; ok {
-					delete(addrs, pod.Name)
-					changed = true
-				}
-			}
-			if !changed {
-				continue
-			}
 
-			replicas := []string{}
-			for _, addr := range addrs {
-				replicas = append(replicas, fmt.Sprintf("tcp://%s:%d", addr, internalPort))
-			}
-			routingInfo := &protos.RoutingInfo{
-				Component: component,
-				Replicas:  replicas,
-			}
-			if err := b.envelope.UpdateRoutingInfo(routingInfo); err != nil {
-				// TODO(mwhittaker): Log this error.
-				fmt.Fprintf(os.Stderr, "UpdateRoutingInfo(%v): %v", routingInfo, err)
+				changed := false
+				switch event.Type {
+				case watch.Added, watch.Modified:
+					pod := event.Object.(*v1.Pod)
+					if pod.Status.PodIP != "" && addrs[pod.Name] != pod.Status.PodIP {
+						addrs[pod.Name] = pod.Status.PodIP
+						changed = true
+					}
+				case watch.Deleted:
+					pod := event.Object.(*v1.Pod)
+					if _, ok := addrs[pod.Name]; ok {
+						delete(addrs, pod.Name)
+						changed = true
+					}
+				case watch.Error: // received error on the channel, the watcher should automatically handle it
+					b.logger.Error("watcher error", "err", errors2.FromObject(event.Object))
+					watcher.Stop()
+					break
+				}
+				if !changed {
+					continue
+				}
+
+				replicas := []string{}
+				for _, addr := range addrs {
+					replicas = append(replicas, fmt.Sprintf("tcp://%s:%d", addr, internalPort))
+				}
+				routingInfo := &protos.RoutingInfo{
+					Component: component,
+					Replicas:  replicas,
+				}
+				if err := b.envelope.UpdateRoutingInfo(routingInfo); err != nil {
+					// TODO(mwhittaker): Log this error.
+					fmt.Fprintf(os.Stderr, "UpdateRoutingInfo(%v): %v", routingInfo, err)
+					b.logger.Error("Robert - error updating routing info on envelope", "err", err)
+				}
 			}
 		}
 	}
