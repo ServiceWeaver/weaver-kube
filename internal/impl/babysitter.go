@@ -151,12 +151,19 @@ func (b *babysitter) Serve() error {
 }
 
 // ActivateComponent implements the envelope.EnvelopeHandler interface.
-func (b *babysitter) ActivateComponent(_ context.Context, request *protos.ActivateComponentRequest) (*protos.ActivateComponentReply, error) {
+func (b *babysitter) ActivateComponent(ctx context.Context, request *protos.ActivateComponentRequest) (*protos.ActivateComponentReply, error) {
 	go func() {
-		if err := b.watchPods(b.ctx, request.Component); err != nil {
-			// TODO(mwhittaker): Log this error.
-			fmt.Fprintf(os.Stderr, "watchPods(%q): %v", request.Component, err)
-			b.logger.Error("error watching pods", "err", err, "component", request.Component)
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-time.After(5 * time.Second):
+				if err := b.watchPods(b.ctx, request.Component); err != nil {
+					// TODO(mwhittaker): Log this error.
+					fmt.Fprintf(os.Stderr, "watchPods(%q): %v", request.Component, err)
+					b.logger.Error("error watching pods", "err", err, "component", request.Component)
+				}
+			}
 		}
 	}()
 	return &protos.ActivateComponentReply{}, nil
@@ -166,10 +173,8 @@ func (b *babysitter) ActivateComponent(_ context.Context, request *protos.Activa
 // routing info whenever the set of pods changes.
 func (b *babysitter) watchPods(ctx context.Context, component string) error {
 	logger := b.logger.With("component", component)
-	logger.Debug("watching pods")
 	b.mu.Lock()
 	if _, ok := b.watching[component]; ok {
-		logger.Debug("the pods for this component are already being watched")
 		// The pods for this component are already being watched.
 		b.mu.Unlock()
 		return nil
@@ -183,18 +188,16 @@ func (b *babysitter) watchPods(ctx context.Context, component string) error {
 		return fmt.Errorf("unable to determine group name for component %s", component)
 	}
 	name := deploymentName(b.app.Name, rs, b.cfg.DeploymentId)
-	//timeOut := int64(60)
-	// , TimeoutSeconds: &timeOut
 	opts := metav1.ListOptions{LabelSelector: fmt.Sprintf("serviceweaver/name=%s", name)}
 
-	// watcher factory
-	watchFunc := func(options metav1.ListOptions) (watch.Interface, error) {
-		w, e := b.clientset.CoreV1().Pods(b.cfg.Namespace).Watch(ctx, opts)
-		logger.Debug("creating a new watcher", "err", e)
-		return w, e
-	}
 	// RetryWatcher, it should handle recoverable errors when watching
-	watcher, err := toolsWatch.NewRetryWatcher("1", &cache.ListWatch{WatchFunc: watchFunc})
+	watcher, err := toolsWatch.NewRetryWatcher("1", &cache.ListWatch{
+		WatchFunc: func(options metav1.ListOptions) (watch.Interface, error) {
+			w, e := b.clientset.CoreV1().Pods(b.cfg.Namespace).Watch(ctx, opts)
+			logger.Debug("creating a new watcher", "err", e)
+			return w, e
+		},
+	})
 	if err != nil {
 		return fmt.Errorf("watch pods for component %s: %w", component, err)
 	}
@@ -208,6 +211,9 @@ func (b *babysitter) watchPods(ctx context.Context, component string) error {
 		case <-ctx.Done():
 			watcher.Stop()
 			return ctx.Err()
+
+		case <-watcher.Done():
+			return fmt.Errorf("watcher done")
 
 		case event, ok := <-watcher.ResultChan():
 			if !ok {
@@ -229,9 +235,7 @@ func (b *babysitter) watchPods(ctx context.Context, component string) error {
 					changed = true
 				}
 			case watch.Error:
-				errObject := apierrors.FromObject(event.Object)
-				logger.Error("watcher error", "err", errObject)
-				// do nothing else? do we need? even with retryWatcher?
+				logger.Error("watcher error", "err", apierrors.FromObject(event.Object))
 			}
 			if !changed {
 				continue
@@ -248,7 +252,6 @@ func (b *babysitter) watchPods(ctx context.Context, component string) error {
 			if err := b.envelope.UpdateRoutingInfo(routingInfo); err != nil {
 				// TODO(mwhittaker): Log this error.
 				fmt.Fprintf(os.Stderr, "UpdateRoutingInfo(%v): %v", routingInfo, err)
-				logger.Error("error updating routing info on envelope", "err", err)
 			}
 		}
 	}
