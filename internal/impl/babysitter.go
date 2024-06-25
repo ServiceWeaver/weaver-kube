@@ -35,9 +35,12 @@ import (
 	"golang.org/x/sync/errgroup"
 	v1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/util/wait"
 	"k8s.io/apimachinery/pkg/watch"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
+	"k8s.io/client-go/tools/cache"
+	watch2 "k8s.io/client-go/tools/watch"
 )
 
 // BabysitterOptions configure a babysitter. See tool.Plugins for details.
@@ -177,9 +180,31 @@ func (b *babysitter) watchPods(ctx context.Context, component string) error {
 	}
 	name := deploymentName(b.app.Name, rs, b.cfg.DeploymentId)
 	opts := metav1.ListOptions{LabelSelector: fmt.Sprintf("serviceweaver/name=%s", name)}
-	watcher, err := b.clientset.CoreV1().Pods(b.cfg.Namespace).Watch(ctx, opts)
+
+	// Create a watcher to watch pod changes for the component.
+	//
+	// Note that we're trying a few times to create a watcher. If we're not able
+	// to create a watcher successfully, we should not continue.
+	var watcher watch.Interface
+	var err error
+	err = wait.ExponentialBackoff(wait.Backoff{
+		Duration: 1 * time.Second,
+		Factor:   1.5,
+		Jitter:   0.2,
+		Steps:    10, // Maximum retry attempts
+	}, func() (bool, error) {
+		watcher, err = watch2.NewRetryWatcher("1", &cache.ListWatch{
+			WatchFunc: func(options metav1.ListOptions) (watch.Interface, error) {
+				return b.clientset.CoreV1().Pods(b.cfg.Namespace).Watch(ctx, opts)
+			},
+		})
+		if err != nil {
+			return false, err // retry to create the watcher
+		}
+		return true, nil // watcher created successfully
+	})
 	if err != nil {
-		return fmt.Errorf("watch pods for component %s: %w", component, err)
+		panic(fmt.Errorf("unable to create RetryWatcher: %v", err))
 	}
 
 	// Repeatedly receive events from Kubernetes, updating the set of pod
