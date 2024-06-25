@@ -182,6 +182,13 @@ func (b *babysitter) watchPods(ctx context.Context, component string) error {
 	b.watching[component] = struct{}{}
 	b.mu.Unlock()
 
+	// clear b.watching before leaving
+	defer func() {
+		b.mu.Lock()
+		delete(b.watching, component)
+		b.mu.Unlock()
+	}()
+
 	// Watch the pods running the requested component.
 	rs, ok := b.cfg.Groups[component]
 	if !ok {
