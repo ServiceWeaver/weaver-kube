@@ -30,6 +30,7 @@ import (
 )
 
 const (
+	defaultBuildTool                = "docker"
 	defaultNamespace                = "default"
 	defaultServiceAccount           = "default"
 	defaultBaseImage                = "ubuntu:rolling"
@@ -86,6 +87,13 @@ func Deploy(ctx context.Context, configFilename string) error {
 	if config.Repo == "" {
 		fmt.Fprintln(os.Stderr, "No container repo specified in the config file. The container image will only be accessible locally. See `weaver kube deploy --help` for details.")
 	}
+	switch config.BuildTool {
+	case "docker", "podman":
+	case "":
+		config.BuildTool = defaultBuildTool
+	default:
+		return fmt.Errorf("unsupported build tool: %s; supported tools are docker and podman", config.BuildTool)
+	}
 	if config.Namespace == "" {
 		config.Namespace = defaultNamespace
 	}
@@ -119,7 +127,7 @@ func Deploy(ctx context.Context, configFilename string) error {
 	depId := uuid.New().String()
 
 	// Build the docker image for the deployment.
-	opts := dockerOptions{image: config.Image, repo: config.Repo, baseImage: config.BaseImage}
+	opts := dockerOptions{image: config.Image, repo: config.Repo, baseImage: config.BaseImage, buildTool: config.BuildTool}
 	image, err := buildAndUploadDockerImage(ctx, app, depId, opts)
 	if err != nil {
 		return err
