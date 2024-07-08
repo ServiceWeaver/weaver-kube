@@ -507,7 +507,7 @@ func generateRolesAndBindings(w io.Writer, namespace, serviceAccount string) err
 			Kind:       "Role",
 		},
 		ObjectMeta: metav1.ObjectMeta{
-			Name:      "pods-getter",
+			Name:      "serviceweaver-pods-getter",
 			Namespace: namespace,
 		},
 		Rules: []rbacv1.PolicyRule{
@@ -525,13 +525,13 @@ func generateRolesAndBindings(w io.Writer, namespace, serviceAccount string) err
 			Kind:       "RoleBinding",
 		},
 		ObjectMeta: metav1.ObjectMeta{
-			Name:      "default-pods-getter",
+			Name:      "serviceweaver-default-pods-getter",
 			Namespace: namespace,
 		},
 		RoleRef: rbacv1.RoleRef{
 			APIGroup: "rbac.authorization.k8s.io",
 			Kind:     "Role",
-			Name:     "pods-getter",
+			Name:     "serviceweaver-pods-getter",
 		},
 		Subjects: []rbacv1.Subject{
 			{
