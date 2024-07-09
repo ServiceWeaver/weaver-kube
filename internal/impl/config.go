@@ -38,6 +38,12 @@ type kubeConfig struct {
 	// version id of the application deployment.
 	Image string
 
+	// Build tool is the name of the container build tool to use.
+	//
+	// If empty, Service Weaver will pick default build tool as `docker`.
+	// Supported values are `docker` and `podman`.
+	BuildTool string
+
 	// Repo is the name of the repository where the container image is uploaded.
 	//
 	// For example, if Image is "mycontainer:v1" and Repo is

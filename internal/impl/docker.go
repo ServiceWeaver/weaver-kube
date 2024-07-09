@@ -39,6 +39,7 @@ type dockerOptions struct {
 	image     string // see kubeConfig.Image
 	repo      string // see kubeConfig.Repo
 	baseImage string // see kubeConfig.BaseImage
+	buildTool string // build tool to be used for building container image ( i.e `podman` or `docker` )
 }
 
 // buildAndUploadDockerImage builds a Docker image and uploads it to a remote
@@ -55,7 +56,7 @@ func buildAndUploadDockerImage(ctx context.Context, app *protos.AppConfig, depId
 	}
 
 	// Push the Docker image to the repo.
-	image, err = pushImage(ctx, image, opts.repo)
+	image, err = pushImage(ctx, image, opts)
 	if err != nil {
 		return "", fmt.Errorf("unable to push image: %w", err)
 	}
@@ -167,13 +168,13 @@ ENTRYPOINT ["{{.Entrypoint}}"]
 
 	ctx, cancel := context.WithTimeout(ctx, dockerBuildTimeout)
 	defer cancel()
-	return image, dockerBuild(ctx, workDir, image)
+	return image, dockerBuild(ctx, workDir, image, opts.buildTool)
 }
 
 // dockerBuild builds a Docker image given a directory and an image name.
-func dockerBuild(ctx context.Context, dir, image string) error {
+func dockerBuild(ctx context.Context, dir, image, buildTool string) error {
 	fmt.Fprintln(os.Stderr, "Building image ", image)
-	c := exec.CommandContext(ctx, "docker", "build", dir, "-t", image)
+	c := exec.CommandContext(ctx, buildTool, "build", dir, "-t", image)
 	c.Stdout = os.Stderr
 	c.Stderr = os.Stderr
 	return c.Run()
@@ -181,17 +182,17 @@ func dockerBuild(ctx context.Context, dir, image string) error {
 
 // pushImage pushes the provided Docker image to the provided repo, returning
 // the repo-qualified image name.
-func pushImage(ctx context.Context, image, repo string) (string, error) {
-	fmt.Fprintf(os.Stderr, greenText(), fmt.Sprintf("\nUploading image to %s...", repo))
-	repoTag := path.Join(repo, image)
-	cTag := exec.CommandContext(ctx, "docker", "tag", image, repoTag)
+func pushImage(ctx context.Context, image string, opts dockerOptions) (string, error) {
+	fmt.Fprintf(os.Stderr, greenText(), fmt.Sprintf("\nUploading image to %s...", opts.repo))
+	repoTag := path.Join(opts.repo, image)
+	cTag := exec.CommandContext(ctx, opts.buildTool, "tag", image, repoTag)
 	cTag.Stdout = os.Stderr
 	cTag.Stderr = os.Stderr
 	if err := cTag.Run(); err != nil {
 		return "", err
 	}
 
-	cPush := exec.CommandContext(ctx, "docker", "push", repoTag)
+	cPush := exec.CommandContext(ctx, opts.buildTool, "push", repoTag)
 	cPush.Stdout = os.Stderr
 	cPush.Stderr = os.Stderr
 	if err := cPush.Run(); err != nil {
