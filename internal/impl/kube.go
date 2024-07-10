@@ -866,5 +866,5 @@ func shortenComponent(component string) string {
 func deploymentName(app, component, deploymentId string) string {
 	hash := hash8([]string{app, component, deploymentId})
 	shortened := strings.ToLower(shortenComponent(component))
-	return fmt.Sprintf("%s-%s-%s", shortened, deploymentId[:8], hash)
+	return fmt.Sprintf("%s-%s-%s-%s", app, shortened, deploymentId[:8], hash)
 }
