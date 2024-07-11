@@ -37,6 +37,7 @@ import (
 	autoscalingv2 "k8s.io/api/autoscaling/v2"
 	_ "k8s.io/api/autoscaling/v2beta2"
 	corev1 "k8s.io/api/core/v1"
+	v1 "k8s.io/api/networking/v1"
 	rbacv1 "k8s.io/api/rbac/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/intstr"
@@ -73,6 +74,7 @@ type deployment struct {
 // listener contains information about a listener.
 type listener struct {
 	name        string // listener name
+	hostname    string // hostname for the listener
 	serviceName string // Kubernetes service name
 	port        int32  // port on which listener listens
 	public      bool   // is the listener publicly accessible
@@ -168,12 +170,13 @@ func buildDeployment(d deployment, g group) (*appsv1.Deployment, error) {
 
 // buildListenerService generates a kubernetes service for a listener.
 //
-// Note that for public listeners, we generate a Load Balancer service because
-// it has to be reachable from the outside; for internal listeners, we generate
-// a ClusterIP service, reachable only from internal Service Weaver services.
+// Note that for public listeners, we generate either a Load Balancer or a
+// ClusterIP based on whether the user wants to use ingress to route traffic from
+// the outside. For internal listeners, we generate a ClusterIP service, reachable
+// only from internal Service Weaver services.
 func buildListenerService(d deployment, g group, lis listener) (*corev1.Service, error) {
 	serviceType := "ClusterIP"
-	if lis.public {
+	if lis.public && lis.hostname == "" {
 		serviceType = "LoadBalancer"
 	}
 
@@ -267,6 +270,73 @@ func buildAutoscaler(d deployment, g group) (*autoscalingv2.HorizontalPodAutosca
 			},
 		},
 		Spec: spec,
+	}, nil
+}
+
+// buildIngress generates a kubernetes ingress that routes external traffic to
+// the public listeners.
+//
+// Note that we create a single ingress per application or per application version,
+// based on whether the user specifies a unique name for the ingress in the config.
+func buildIngress(d deployment) (*v1.Ingress, error) {
+	if d.config.IngressSpec == nil {
+		return nil, nil
+	}
+
+	// Build ingress rules, one for each public listener.
+	var rules []v1.IngressRule
+	var listeners []string
+	for _, g := range d.groups {
+		for _, lis := range g.listeners {
+			if !lis.public {
+				continue
+			}
+			listeners = append(listeners, lis.name)
+			rules = append(rules, v1.IngressRule{
+				Host: lis.hostname,
+				IngressRuleValue: v1.IngressRuleValue{
+					HTTP: &v1.HTTPIngressRuleValue{
+						Paths: []v1.HTTPIngressPath{
+							{
+								Path:     "/",
+								PathType: ptrOf(v1.PathTypePrefix),
+								Backend: v1.IngressBackend{
+									Service: &v1.IngressServiceBackend{
+										Name: lis.serviceName,
+										Port: v1.ServiceBackendPort{
+											Number: servicePort,
+										},
+									},
+								},
+							},
+						},
+					},
+				},
+			})
+		}
+	}
+
+	iname := d.app.Name + "-ingress"
+	d.config.IngressSpec.Annotations["description"] =
+		fmt.Sprintf("This Ingress routes traffic to listeners %v.", strings.Join(listeners, ", "))
+
+	return &v1.Ingress{
+		TypeMeta: metav1.TypeMeta{
+			APIVersion: "networking.k8s.io/v1",
+			Kind:       "Ingress",
+		},
+		ObjectMeta: metav1.ObjectMeta{
+			Name:        iname,
+			Namespace:   d.config.Namespace,
+			Labels:      map[string]string{"serviceweaver/app": d.app.Name},
+			Annotations: d.config.IngressSpec.Annotations,
+		},
+		Spec: v1.IngressSpec{
+			IngressClassName: d.config.IngressSpec.Spec.IngressClassName,
+			TLS:              d.config.IngressSpec.Spec.TLS,
+			Rules:            rules,
+			DefaultBackend:   d.config.IngressSpec.Spec.DefaultBackend,
+		},
 	}, nil
 }
 
@@ -665,6 +735,16 @@ func generateCoreYAMLs(w io.Writer, d deployment) error {
 		}
 		fmt.Fprintf(os.Stderr, "Generated kube autoscaler for group %v\n", g.Name)
 	}
+
+	// May build an ingress to route the external traffic to the application.
+	ingress, err := buildIngress(d)
+	if err != nil {
+		return fmt.Errorf("unable to create kube ingress for %s: %w", d.app.Name, err)
+	}
+	if err := marshalResource(w, ingress, fmt.Sprintf("Ingress for app %s", d.app.Name)); err != nil {
+		return err
+	}
+	fmt.Fprintf(os.Stderr, "Generated kube ingress for app %v\n", d.app.Name)
 	return nil
 }
 
@@ -791,6 +871,7 @@ func newListener(depId string, config *kubeConfig, name string) listener {
 		if l.Port != 0 {
 			lis.port = l.Port
 		}
+		lis.hostname = l.HostName
 		return lis
 	}
 	return lis

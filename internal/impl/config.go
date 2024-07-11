@@ -17,6 +17,7 @@ package impl
 import (
 	autoscalingv2 "k8s.io/api/autoscaling/v2"
 	corev1 "k8s.io/api/core/v1"
+	v1 "k8s.io/api/networking/v1"
 )
 
 // kubeConfig contains the kubernetes configuration for a Service Weaver
@@ -109,6 +110,16 @@ type kubeConfig struct {
 	// [1] https://pkg.go.dev/k8s.io/api/core/v1#Probe.
 	ProbeSpec probes
 
+	// Options for ingress. Note that the ingress specs should satisfy the format
+	// specified in [1].
+	//
+	// Note that right now we create a single ingress per application. I.e., once
+	// you release a new version of the application, the traffic will instantaneously
+	// be shifted to the new version of your application.
+	//
+	// [1] https://pkg.go.dev/k8s.io/api/networking/v1#Ingress
+	IngressSpec *ingress
+
 	// Groups contains kubernetes configuration for groups of collocated components.
 	// Note that some knobs if specified for a group will override the corresponding
 	// knob set for all the groups (e.g., ScalingSpec, ResourceSpec); for knobs like
@@ -124,6 +135,10 @@ type kubeConfig struct {
 type listenerSpec struct {
 	// Listener name.
 	Name string
+
+	// Hostname for the listener. It should be non-empty iff the listener is public
+	// and reachable from the public internet via an ingress.
+	HostName string
 
 	// If specified, the listener service will have the name set to this value.
 	// Otherwise, we will generate a unique name for each app version.
@@ -148,6 +163,20 @@ type probes struct {
 	ReadinessProbe *corev1.Probe // Periodic probe of container service readiness.
 	LivenessProbe  *corev1.Probe // Periodic probe of container liveness.
 	StartupProbe   *corev1.Probe // Indicates that the pod has successfully initialized.
+}
+
+// Encapsulates ingress specs as defined by the user in the kubernetes config.
+type ingress struct {
+	// Annotations used to provide custom configurations for the ingress.
+	Annotations map[string]string
+
+	// Ingress specs.
+	//
+	// Note that the user should specify at least the IngressClassName. The only
+	// other config that we let the user specify is TLS.
+	//
+	// [1] https://pkg.go.dev/k8s.io/api/networking/v1#IngressSpec
+	Spec *v1.IngressSpec
 }
 
 // group contains kubernetes configuration for a group of colocated components.

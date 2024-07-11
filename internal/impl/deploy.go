@@ -117,6 +117,10 @@ func Deploy(ctx context.Context, configFilename string) error {
 			allListeners[l] = struct{}{}
 		}
 	}
+
+	if err := validateRoutingSpec(config.IngressSpec, config.Listeners); err != nil {
+		return err
+	}
 	for _, lis := range config.Listeners {
 		if _, ok := allListeners[lis.Name]; !ok {
 			return fmt.Errorf("listener %s specified in the config not found in the binary", lis.Name)
@@ -191,6 +195,46 @@ updating the 'weaver-kube' command by running the following.
 Then, re-build your code and re-run 'weaver-kube deploy'. If the problem
 persists, please file an issue at https://github.com/ServiceWeaver/weaver/issues`,
 			relativize(appBinary), appBinaryVersions.ModuleVersion, appBinaryVersions.DeployerVersion, selfVersion, weaverKubeVersions.ModuleVersion, version.DeployerVersion)
+	}
+	return nil
+}
+
+// validateRoutingSpec validates that the routing spec is correctly specified.
+func validateRoutingSpec(ingress *ingress, listeners []listenerSpec) error {
+	var hasHostName bool
+	for _, lis := range listeners {
+		// Private listeners shouldn't have a hostname specified.
+		if !lis.Public && lis.HostName == "" {
+			return fmt.Errorf("hostname should not be specified for private listener %s", lis.Name)
+		}
+		if lis.Public && lis.HostName != "" {
+			hasHostName = true
+		}
+	}
+
+	if !hasHostName {
+		// Public listeners are reachable from the outside via load balancers.
+		// If the user has specified any ingress config, we should ignore it.
+		ingress = nil
+		return nil
+	}
+
+	// Verify that all public listeners have a hostname specified.
+	for _, lis := range listeners {
+		if lis.Public && lis.HostName == "" {
+			return fmt.Errorf("hostname should be specified for public listener %s", lis.Name)
+		}
+	}
+
+	// Verify that the ingress spec specified by the user is valid.
+	if ingress == nil || ingress.Spec == nil {
+		return fmt.Errorf("ingress spec not specified")
+	}
+	if ingress.Spec.IngressClassName == nil || *ingress.Spec.IngressClassName == "" {
+		return fmt.Errorf("ingress class name not specified")
+	}
+	if len(ingress.Spec.Rules) > 0 {
+		return fmt.Errorf("non empty ingress rules specified in the config; ingress rules are automatically generated")
 	}
 	return nil
 }
