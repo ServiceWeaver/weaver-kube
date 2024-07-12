@@ -145,12 +145,16 @@ Flags:
        For each group, you can also configure the resource, scaling and the storage
        specs as shown in e), f) and h).
 
+    i) Whether the application container should be built using Docker or Podman [7]. E.g.,
+       buildTool: podman
+
     [1] https://kubernetes.io/docs/concepts/overview/working-with-objects/namespaces/
     [2] https://kubernetes.io/docs/concepts/security/service-accounts/ 
     [3] https://kubernetes.io/docs/concepts/configuration/manage-resources-containers/
     [4] https://kubernetes.io/docs/tasks/run-application/horizontal-pod-autoscale/
     [5] https://kubernetes.io/docs/tasks/configure-pod-container/configure-liveness-readiness-startup-probes/
     [6] https://kubernetes.io/docs/concepts/storage/volumes/
+    [7] https://podman.io/
 `,
 		Flags: flags,
 		Fn: func(ctx context.Context, args []string) error {
